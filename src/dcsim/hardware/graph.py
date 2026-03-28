@@ -22,6 +22,25 @@ from dcsim.hardware.components import (
 class HardwareGraph:
     """Wraps a NetworkX graph representing the datacenter hardware topology."""
 
+    @staticmethod
+    def _extract_target_id(data: dict, *fallback_keys: str) -> str:
+        """Extract a target component ID from event data with fallback chain.
+
+        Tries ``target_id`` first, then each key in *fallback_keys*, then
+        ``component_id`` as the last resort.
+        """
+        if "target_id" in data:
+            return data["target_id"]
+        for key in fallback_keys:
+            if key in data:
+                return data[key]
+        if "component_id" in data:
+            return data["component_id"]
+        raise KeyError(
+            f"Cannot find target ID in event data. Tried: target_id, {', '.join(fallback_keys)}, component_id. "
+            f"Available keys: {list(data.keys())}"
+        )
+
     def __init__(self) -> None:
         self._graph: nx.Graph = nx.Graph()
         self._components: dict[str, HardwareComponent] = {}
@@ -170,37 +189,37 @@ class HardwareGraph:
     # -- Event handlers --
 
     def _handle_gpu_fail(self, event: Event, ctx: SimulationContext) -> list[EventPayload] | None:
-        gpu_id = event.payload.data["target_id"]
+        gpu_id = self._extract_target_id(event.payload.data, "gpu_id")
         self.apply_state_change(gpu_id, GPUState.FAILED, event, ctx.queue, ctx.clock.now())
         return None
 
     def _handle_gpu_repair(self, event: Event, ctx: SimulationContext) -> list[EventPayload] | None:
-        gpu_id = event.payload.data["target_id"]
+        gpu_id = self._extract_target_id(event.payload.data, "gpu_id")
         self.apply_state_change(gpu_id, GPUState.IDLE, event, ctx.queue, ctx.clock.now())
         return None
 
     def _handle_gpu_throttle(self, event: Event, ctx: SimulationContext) -> list[EventPayload] | None:
-        gpu_id = event.payload.data["target_id"]
+        gpu_id = self._extract_target_id(event.payload.data, "gpu_id")
         self.apply_state_change(gpu_id, GPUState.THROTTLED, event, ctx.queue, ctx.clock.now())
         return None
 
     def _handle_gpu_unthrottle(self, event: Event, ctx: SimulationContext) -> list[EventPayload] | None:
-        gpu_id = event.payload.data["target_id"]
+        gpu_id = self._extract_target_id(event.payload.data, "gpu_id")
         self.apply_state_change(gpu_id, GPUState.IN_USE, event, ctx.queue, ctx.clock.now())
         return None
 
     def _handle_link_fail(self, event: Event, ctx: SimulationContext) -> list[EventPayload] | None:
-        link_id = event.payload.data["target_id"]
+        link_id = self._extract_target_id(event.payload.data, "link_id")
         self.apply_state_change(link_id, LinkState.DOWN, event, ctx.queue, ctx.clock.now())
         return None
 
     def _handle_link_repair(self, event: Event, ctx: SimulationContext) -> list[EventPayload] | None:
-        link_id = event.payload.data["target_id"]
+        link_id = self._extract_target_id(event.payload.data, "link_id")
         self.apply_state_change(link_id, LinkState.UP, event, ctx.queue, ctx.clock.now())
         return None
 
     def _handle_switch_fail(self, event: Event, ctx: SimulationContext) -> list[EventPayload] | None:
-        switch_id = event.payload.data["target_id"]
+        switch_id = self._extract_target_id(event.payload.data, "switch_id")
         self.apply_state_change(switch_id, SwitchState.FAILED, event, ctx.queue, ctx.clock.now())
         return None
 

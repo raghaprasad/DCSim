@@ -279,7 +279,12 @@ class WorkloadManager:
         ]
 
     def _handle_gpu_throttled(self, event: Event, ctx: SimulationContext) -> list[EventPayload] | None:
-        """Handle cascade.gpu.throttled — recalculate phase duration if in compute."""
+        """Handle cascade.gpu.throttled — recalculate compute phase duration.
+
+        Computes remaining work as a fraction of the old duration, then scales
+        it to the new (throttled) rate.  Does NOT call get_next_phase() because
+        that method has side-effects (_in_communicate toggle).
+        """
         wl = self._workload
         if wl is None or wl.state != "running":
             return None
@@ -299,20 +304,13 @@ class WorkloadManager:
 
         now = ctx.clock.now()
 
-        # Recalculate: get new duration from workload using updated throttle factors
-        gpu_states = self._get_gpu_states()
-        result = wl.get_next_phase(gpu_states, now)
-        if result is None:
-            return None
+        # Compute new full-step duration directly from throttle factors
+        # (avoid calling get_next_phase which has side-effects)
+        min_throttle = min(self._gpu_throttle_factors.values()) or 0.01
+        new_full_duration = int(wl.base_compute_us / min_throttle)
 
-        phase, new_full_duration = result
-
-        # Calculate: how much time has elapsed in this phase?
+        # How much of the phase was completed at the OLD rate?
         elapsed = now - self._phase_start_time
-        # The remaining time should be based on the new full duration minus the elapsed time
-        # But elapsed was at the OLD rate. We need to figure out the fraction completed.
-        # fraction_done = elapsed / old_duration
-        # remaining_at_new_rate = (1 - fraction_done) * new_full_duration
         if self._phase_total_duration > 0:
             fraction_done = elapsed / self._phase_total_duration
         else:
@@ -322,19 +320,18 @@ class WorkloadManager:
         if remaining < 0:
             remaining = 0
 
-        self._phase_total_duration = new_full_duration
-        self._phase_start_time = now  # Reset for any future recalculation
-        # Update the "old duration" to be remaining so future fraction calcs work
+        # Update tracking for potential future recalculations
+        self._phase_start_time = now
         self._phase_total_duration = remaining
 
-        # Reschedule phase completion
+        # Reschedule phase completion — still a COMPUTE phase
         self._pending_event = self._sim.queue.schedule(
             now + remaining,
             EventPayload(
                 event_type="workload.phase.complete",
                 data={
                     "job_id": wl.job_id,
-                    "phase": phase.value,
+                    "phase": WorkloadPhase.COMPUTE.value,
                     "step": wl.current_step,
                 },
             ),

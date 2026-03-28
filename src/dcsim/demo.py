@@ -87,12 +87,20 @@ def run_scenario(
 
     result = sim.run(until=60 * SECOND)
 
+    # Find actual training completion time (not sim end time which may
+    # include post-training events like unthrottle/repair)
+    training_end_us = result.final_time
+    for entry in logger.get_timeline():
+        if entry.event_type == "workload.job.complete":
+            training_end_us = entry.timestamp
+            break
+
     return ScenarioResult(
         name=name,
         workload_state=workload.state,
         steps_completed=workload.current_step,
         total_steps=workload.total_steps,
-        final_time_us=result.final_time,
+        final_time_us=training_end_us,
         events_processed=result.events_processed,
         timeline=logger.get_timeline(),
         log_dicts=logger.export_dicts(),

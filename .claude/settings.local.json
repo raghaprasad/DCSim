@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(python3 -c \"import simpy; print\\(simpy.__version__\\)\")",
+      "Bash(python3 -c \"import networkx; print\\(networkx.__version__\\)\")",
+      "Bash(python3 -c \"import fastapi; print\\(fastapi.__version__\\)\")",
+      "Bash(pip3 list:*)",
+      "Bash(pip install:*)",
+      "Bash(python3 -m venv .venv)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(source /Users/raghaprasad/Workspaces/proto/.venv/bin/activate)",
+      "Bash(python -m pytest tests/test_engine.py -v)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"Phase 1: Core simulation engine + project structure:*)"
+    ]
+  }
+}

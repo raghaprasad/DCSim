@@ -55,6 +55,12 @@ python -m dcsim --chaos-file demo/example_chaos.json
 
 # Name your scenario for unique reports
 python -m dcsim --chaos "gpu.fail node-0/gpu-0 1s 10s" --name "Single GPU crash" --steps 20
+
+# Combine multiple failures in one run
+python -m dcsim \
+  --chaos "gpu.throttle node-1/gpu-4 320ms 5s throttle_factor=0.33" \
+  --chaos "link.fail link-tor-0-spine-0 110ms 100ms" \
+  --name "Thermal + Link Flap"
 ```
 
 Available preset scenarios: `baseline`, `gpu-failure`, `thermal-throttle`, `link-flap`, `all`

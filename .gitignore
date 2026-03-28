@@ -10,3 +10,5 @@ node_modules/
 ui/dist/
 *.egg
 .DS_Store
+reports/
+*.html

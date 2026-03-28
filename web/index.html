@@ -91,6 +91,7 @@
       </div>
       <button id="run-btn" disabled>Run Simulation</button>
     </div>
+    <div id="scenario-desc" style="margin-top:12px; padding:12px 14px; background:var(--bg); border:1px solid var(--border); border-radius:6px; font-size:0.85rem; color:var(--muted); line-height:1.5;"></div>
     <div id="custom-chaos-section" class="hidden">
       <textarea id="chaos-input" placeholder="gpu.throttle node-0/gpu-3 100ms throttle_factor=0.25&#10;gpu.fail node-3/gpu-6 800ms 7s&#10;link.fail link-tor-0-spine-0 500ms 80ms"></textarea>
       <div id="validation-msg" class="help-text"></div>
@@ -132,7 +133,46 @@ const statusArea = document.getElementById('status-area');
 const loadMsg = document.getElementById('load-msg');
 const overlay = document.getElementById('loading-overlay');
 
+const scenarioDesc = document.getElementById('scenario-desc');
 const chaosInput = document.getElementById('chaos-input');
+
+const SCENARIO_INFO = {
+  baseline: `<strong>Baseline (no chaos)</strong> &mdash; 32 GPUs run 10 AllReduce training iterations with no hardware issues. Each iteration = 100ms compute + 50ms gradient sync = 150ms. This is your reference: total training time should be exactly 1,500ms.`,
+
+  thermal_throttle: `<strong>Thermal Throttle</strong> &mdash; A GPU overheats and the hardware automatically reduces its clock speed to prevent damage. In this scenario, one GPU drops to 0.33x speed at t=320ms. Because AllReduce training is <em>synchronous</em> (all GPUs must finish compute before anyone can communicate), the other 31 GPUs sit idle waiting for the slow one every single iteration. <em>Look for:</em> gray "idle-waiting" bars on the healthy GPU row.`,
+
+  link_flap: `<strong>Link Flap</strong> &mdash; A network link between a top-of-rack (ToR) switch and a spine switch goes down briefly. This is common in datacenters &mdash; a cable gets bumped, a transceiver glitches, or a switch port resets. During the outage, the AllReduce gradient exchange can't complete because some GPUs are unreachable. After the link recovers, routing tables need to reconverge (10ms penalty). <em>Look for:</em> the affected comms phase stretching beyond the normal 50ms.`,
+
+  xid_79: `<strong>XID 79 &mdash; GPU Hard Failure</strong> &mdash; An NVIDIA XID error (e.g., "GPU has fallen off the bus") makes a GPU completely non-functional. This is a real error code from NVIDIA drivers. The GPU must be detected as failed, the node rebooted, drivers reloaded, and the GPU health-checked before training can resume &mdash; typically a 10+ second process. All 31 other GPUs sit completely idle during this entire repair window. <em>Look for:</em> the massive red failure bar and corresponding gray idle bar.`,
+
+  dual_throttle: `<strong>Dual Throttle (different severities)</strong> &mdash; Two GPUs in different racks overheat at different times. GPU 7 drops to 0.5x (mild), GPU 20 drops to 0.2x (severe). Because training waits for the <em>slowest</em> GPU, only the 0.2x GPU matters &mdash; the 0.5x GPU finishes its compute and then waits too. <em>Look for:</em> different orange bar lengths per GPU &mdash; the 0.2x GPU fills the full phase, while the 0.5x GPU has orange + gray.`,
+
+  throttle_then_xid: `<strong>Throttle then XID</strong> &mdash; A GPU starts thermal throttling (0.33x), slowing every iteration. Then, while training is already degraded, a <em>different</em> GPU hits an XID error and dies. Training halts for 8 seconds during repair. When it resumes, the original GPU is still throttled, so iterations remain slow. The penalties compound: slow compute + long repair gap. <em>Look for:</em> slow iterations before the failure, a long gap, then more slow iterations after.`,
+
+  throttle_plus_link_flap: `<strong>Throttle + Link Flap</strong> &mdash; A GPU thermal-throttles to 0.25x (compute takes 4x longer), and then a network link flaps during a later comms phase. The throttle makes every compute phase longer; the link flap makes one comms phase longer. Both penalties stack independently. <em>Look for:</em> consistently wider compute bars (throttle) plus one wider comms bar (link flap).`,
+
+  xid_plus_link_flap: `<strong>XID + Link Flap</strong> &mdash; A GPU fails with an XID error (6s repair), and shortly after it recovers, a network link flaps. The training first halts for the GPU repair, resumes, and then immediately gets hit by a comms disruption. <em>Look for:</em> the red failure gap, a brief recovery, then a comms delay in the very next iteration.`,
+
+  cascading_link_failure: `<strong>Cascading Link Failure</strong> &mdash; Both spine links from rack 0 fail in quick succession (20ms apart). This simulates a scenario where a spine switch or power distribution unit issue takes down multiple links to the same rack. While the links are down, rack 0's 16 GPUs are isolated from rack 1. <em>Look for:</em> two link failure events close together in the event log, and a comms phase that can't complete until both recover.`,
+
+  perfect_storm: `<strong>Perfect Storm</strong> &mdash; Everything goes wrong at once: a GPU thermal-throttles to 0.25x at t=100ms (slowing all compute), a different GPU hits XID failure at t=800ms (halting training for 7s), and then a link flaps at t=7.9s during recovery. This is the worst case &mdash; all three fault types overlapping. <em>Look for:</em> slow iterations, a long red gap, then a comms delay right after resumption.`,
+
+  custom: `<strong>Custom Scenario</strong> &mdash; Define your own chaos events below. Each line is one hardware failure:<br><br>` +
+    `<table style="width:100%;font-size:0.82rem;border-collapse:collapse;margin-bottom:8px;">` +
+    `<tr style="border-bottom:1px solid var(--border);"><td style="padding:4px 8px;"><code>gpu.throttle</code></td><td style="padding:4px 8px;">GPU overheats, clock speed reduced. Add <code>throttle_factor=0.33</code> for 3x slowdown.</td></tr>` +
+    `<tr style="border-bottom:1px solid var(--border);"><td style="padding:4px 8px;"><code>gpu.fail</code></td><td style="padding:4px 8px;">GPU dies (XID error). Needs full reboot. Set duration for auto-repair, e.g. <code>10s</code>.</td></tr>` +
+    `<tr style="border-bottom:1px solid var(--border);"><td style="padding:4px 8px;"><code>link.fail</code></td><td style="padding:4px 8px;">Network link goes down. Blocks communication between racks. Set duration for recovery.</td></tr>` +
+    `<tr><td style="padding:4px 8px;"><code>switch.fail</code></td><td style="padding:4px 8px;">Entire switch fails. All connected links go down (cascading failure).</td></tr>` +
+    `</table>` +
+    `<strong>Targets:</strong> GPUs: <code>node-0/gpu-0</code> through <code>node-3/gpu-7</code> (32 total). Links: <code>link-tor-0-spine-0</code>, <code>link-tor-0-spine-1</code>, <code>link-tor-1-spine-0</code>, <code>link-tor-1-spine-1</code>. Switches: <code>tor-0</code>, <code>tor-1</code>, <code>spine-0</code>, <code>spine-1</code>.<br><br>` +
+    `<strong>Example:</strong><br><code>gpu.throttle node-0/gpu-2 100ms throttle_factor=0.5</code><br><code>gpu.fail node-3/gpu-6 800ms 7s</code><br><code>link.fail link-tor-0-spine-0 500ms 80ms</code>`,
+};
+
+function updateScenarioDesc() {
+  const val = scenarioSelect.value;
+  scenarioDesc.innerHTML = SCENARIO_INFO[val] || '';
+}
+updateScenarioDesc();
 const validationMsg = document.getElementById('validation-msg');
 
 const VALID_TYPES = new Set([
@@ -201,6 +241,7 @@ chaosInput.addEventListener('input', validateChaosInput);
 
 scenarioSelect.addEventListener('change', () => {
   customSection.classList.toggle('hidden', scenarioSelect.value !== 'custom');
+  updateScenarioDesc();
 });
 
 function setStatus(msg, type) {

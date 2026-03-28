@@ -1,0 +1,15 @@
+[
+    {
+        "target_id": "node-1/gpu-4",
+        "event_type": "gpu.throttle",
+        "time": "320ms",
+        "duration": "5s",
+        "properties": {"throttle_factor": 0.33}
+    },
+    {
+        "target_id": "node-3/gpu-1",
+        "event_type": "gpu.fail",
+        "time": "2s",
+        "duration": "10s"
+    }
+]

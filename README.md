@@ -7,10 +7,10 @@ A discrete event simulator that shows what happens to AI training runs when data
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-python -m dcsim --html reports/ --open
+python -m dcsim
 ```
 
-This runs 4 scenarios and opens an interactive HTML report in your browser.
+This runs 4 scenarios, generates interactive HTML reports in `reports/`, and opens them in your browser.
 
 ## What You'll See
 
@@ -43,13 +43,50 @@ Each scenario report includes:
 ## CLI Options
 
 ```bash
-python -m dcsim                              # Terminal summary only
-python -m dcsim --html reports/              # Generate per-scenario HTML reports
-python -m dcsim --html reports/ --open       # Generate and open in browser
-python -m dcsim --scenario thermal-throttle  # Run a single scenario
+# Preset scenarios (HTML reports generated + opened by default)
+python -m dcsim                              # Run all 4 scenarios
+python -m dcsim --scenario thermal-throttle  # Run a single preset scenario
+python -m dcsim --no-html                    # Terminal summary only, no HTML
+
+# Custom chaos injection
+python -m dcsim --chaos "gpu.throttle node-1/gpu-4 320ms 5s throttle_factor=0.33"
+python -m dcsim --chaos "gpu.fail node-3/gpu-1 460ms 10s" --chaos "link.fail link-tor-0-spine-0 110ms 100ms"
+python -m dcsim --chaos-file demo/example_chaos.json
+
+# Name your scenario for unique reports
+python -m dcsim --chaos "gpu.fail node-0/gpu-0 1s 10s" --name "Single GPU crash" --steps 20
 ```
 
-Available scenarios: `baseline`, `gpu-failure`, `thermal-throttle`, `link-flap`, `all`
+Available preset scenarios: `baseline`, `gpu-failure`, `thermal-throttle`, `link-flap`, `all`
+
+### Custom chaos format
+
+```
+<event_type> <target_id> <time> [duration] [key=value ...]
+```
+
+| Event type | Shorthand | Target example |
+|---|---|---|
+| `hardware.gpu.fail` | `gpu.fail` | `node-1/gpu-4` |
+| `hardware.gpu.throttle` | `gpu.throttle` | `node-1/gpu-4` (add `throttle_factor=0.33`) |
+| `hardware.link.fail` | `link.fail` | `link-tor-0-spine-0` |
+| `hardware.switch.fail` | `switch.fail` | `tor-0` |
+
+Times accept `us`, `ms`, `s` suffixes. If `duration` is given, a matching repair event is auto-scheduled.
+
+You can also define scenarios in a JSON file (see `demo/example_chaos.json`):
+
+```json
+[
+    {
+        "target_id": "node-1/gpu-4",
+        "event_type": "gpu.throttle",
+        "time": "320ms",
+        "duration": "5s",
+        "properties": {"throttle_factor": 0.33}
+    }
+]
+```
 
 ## Architecture
 

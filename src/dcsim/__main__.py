@@ -16,8 +16,11 @@ import webbrowser
 
 from dcsim.demo import (
     ScenarioResult,
+    load_chaos_file,
+    parse_chaos_string,
     print_summary,
     run_all_scenarios,
+    run_scenario,
     scenario_baseline,
     scenario_gpu_failure,
     scenario_link_flap,
@@ -41,29 +44,87 @@ def main() -> None:
     parser.add_argument(
         "--html",
         metavar="DIR",
-        default=None,
-        help="Write per-scenario HTML reports to DIR (created if needed)",
+        default="reports/",
+        help="Write per-scenario HTML reports to DIR (default: reports/)",
+    )
+    parser.add_argument(
+        "--no-html",
+        action="store_true",
+        default=False,
+        help="Skip HTML report generation, terminal summary only",
     )
     parser.add_argument(
         "--scenario",
         choices=list(SCENARIOS.keys()) + ["all"],
-        default="all",
-        help="Run a specific scenario or all (default: all)",
+        default=None,
+        help="Run a named scenario (default: run all if no --chaos given)",
     )
     parser.add_argument(
         "--open",
         action="store_true",
+        default=True,
+        help="Open HTML reports in browser (default: on)",
+    )
+    parser.add_argument(
+        "--no-open",
+        action="store_true",
         default=False,
-        help="Open HTML reports in browser after generation",
+        help="Don't open HTML reports in browser",
+    )
+    parser.add_argument(
+        "--name",
+        metavar="NAME",
+        default=None,
+        help="Name for the scenario (used in reports). Defaults to 'Custom chaos'.",
+    )
+    parser.add_argument(
+        "--chaos",
+        action="append",
+        metavar="EVENT",
+        help=(
+            'Inject a custom chaos event. Format: "<type> <target> <time> [duration] [key=val ...]". '
+            'Example: "gpu.throttle node-1/gpu-4 320ms 5s throttle_factor=0.33". '
+            "Can be repeated."
+        ),
+    )
+    parser.add_argument(
+        "--chaos-file",
+        metavar="PATH",
+        help="Load chaos events from a JSON file.",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=10,
+        help="Number of training steps (default: 10)",
     )
     args = parser.parse_args()
 
+    if args.no_html:
+        args.html = None
+    if args.no_open:
+        args.open = False
+
     # Run scenarios
     results: list[ScenarioResult]
-    if args.scenario == "all":
-        results = run_all_scenarios()
-    else:
+    if args.chaos or args.chaos_file:
+        # Custom chaos mode
+        from dcsim.chaos.injector import ChaosEvent
+        chaos_events: list[ChaosEvent] = []
+        if args.chaos:
+            for s in args.chaos:
+                chaos_events.append(parse_chaos_string(s))
+        if args.chaos_file:
+            chaos_events.extend(load_chaos_file(args.chaos_file))
+        results = [run_scenario(
+            name=args.name or "Custom chaos",
+            chaos_events=chaos_events,
+            total_steps=args.steps,
+        )]
+    elif args.scenario and args.scenario != "all":
         results = [SCENARIOS[args.scenario]()]
+    else:
+        results = run_all_scenarios()
 
     print_summary(results)
 

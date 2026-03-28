@@ -159,13 +159,17 @@ def _build_gpu_timeline(timeline: list[LogEntry]) -> go.Figure:
                         hoverinfo="text",
                     ))
 
-        # Per-affected-GPU rows
+        # Per-affected-GPU rows — show each GPU's individual compute time
         for gid, info in affected_gpus.items():
             state = info["state"]
             row_label = f"  {gid} ({state})"
             throttle_time_ms = info["time_ms"]
+            gpu_throttle = info.get("throttle_factor", 0.33)
 
             if state == "throttled":
+                # This GPU's own compute time based on its throttle factor
+                gpu_compute_ms = baseline_compute_ms / gpu_throttle
+
                 for iv in phase_intervals:
                     if iv["phase"] != "compute":
                         continue
@@ -174,14 +178,28 @@ def _build_gpu_timeline(timeline: list[LogEntry]) -> go.Figure:
                     is_after_throttle = start >= throttle_time_ms or (start < throttle_time_ms < end)
 
                     if is_after_throttle and dur > baseline_compute_ms + 0.5:
+                        # This GPU is throttled. Show its individual compute time.
+                        my_compute = min(gpu_compute_ms, dur)  # can't exceed phase
+                        my_wait = dur - my_compute
+
+                        # Compute bar (orange)
                         fig.add_trace(go.Bar(
-                            y=[row_label], x=[dur], base=[start], orientation="h",
+                            y=[row_label], x=[my_compute], base=[start], orientation="h",
                             marker_color=COLORS["throttled"], showlegend=False,
-                            hovertext=f"Step {iv['step']}: compute (throttled)<br>"
-                                      f"{start:.1f} - {end:.1f}ms ({dur:.1f}ms — "
-                                      f"{dur/baseline_compute_ms:.1f}x baseline)",
+                            hovertext=f"Step {iv['step']}: compute ({gid})<br>"
+                                      f"{start:.1f} - {start + my_compute:.1f}ms "
+                                      f"({my_compute:.0f}ms — {my_compute/baseline_compute_ms:.1f}x baseline)",
                             hoverinfo="text",
                         ))
+                        # Idle-wait bar (gray) if this GPU finishes before the laggard
+                        if my_wait > 0.5:
+                            fig.add_trace(go.Bar(
+                                y=[row_label], x=[my_wait], base=[start + my_compute],
+                                orientation="h", marker_color=COLORS["idle_wait"], showlegend=False,
+                                hovertext=f"Step {iv['step']}: {gid} IDLE — waiting for slower GPU<br>"
+                                          f"{start + my_compute:.0f} - {end:.1f}ms ({my_wait:.0f}ms wasted)",
+                                hoverinfo="text",
+                            ))
                     else:
                         fig.add_trace(go.Bar(
                             y=[row_label], x=[dur], base=[start], orientation="h",

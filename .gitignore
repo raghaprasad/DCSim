@@ -11,4 +11,7 @@ ui/dist/
 *.egg
 .DS_Store
 reports/
+reports_*/
 dcsim_report.html
+claude-archive/
+.claude/worktrees/

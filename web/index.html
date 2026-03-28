@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="icon.png">
 <title>DCSim: Datacenter Chaos Engineering Simulator</title>
 <style>
   :root { --bg: #0f172a; --surface: #1e293b; --border: #334155; --text: #e2e8f0; --muted: #94a3b8; --accent: #3b82f6; --green: #22c55e; --orange: #f59e0b; --red: #ef4444; }
@@ -58,8 +59,13 @@
 </div>
 
 <div class="container">
-  <h1>DCSim: Datacenter Chaos Engineering Simulator</h1>
-  <p class="subtitle">Discrete event simulation of AI training under hardware chaos. Runs entirely in your browser via WebAssembly.</p>
+  <div style="display:flex; align-items:center; gap:16px; margin-bottom:4px;">
+    <img src="icon.png" alt="DCSim" style="width:64px; height:64px; border-radius:8px;">
+    <div>
+      <h1 style="margin-bottom:2px;">DCSim</h1>
+      <p class="subtitle" style="margin-bottom:0;">Datacenter Chaos Engineering Simulator. Runs entirely in your browser via WebAssembly.</p>
+    </div>
+  </div>
 
   <div class="controls">
     <div class="controls-row">

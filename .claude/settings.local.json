@@ -14,7 +14,19 @@
       "Bash(git init:*)",
       "Bash(git add:*)",
       "Bash(git commit -m \"Phase 1: Core simulation engine + project structure:*)",
-      "Bash(git commit -m \"Hackathon scope: update CLAUDE.md with simplified 4-agent plan:*)"
+      "Bash(git commit -m \"Hackathon scope: update CLAUDE.md with simplified 4-agent plan:*)",
+      "Bash(git:*)",
+      "Bash(pytest tests/ -v)",
+      "Bash(python -c \"import networkx; print\\(networkx.__version__\\)\")",
+      "Bash(pytest tests/test_workloads.py -v)",
+      "Bash(pytest tests/test_engine.py -v)",
+      "Bash(for dir:*)",
+      "Bash(do echo:*)",
+      "Read(//Users/raghaprasad/Workspaces/proto/src/dcsim/**)",
+      "Bash(done)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -m pytest tests/test_engine.py -v --tb=short)",
+      "Bash(git commit:*)"
     ]
   }
 }

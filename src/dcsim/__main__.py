@@ -1,17 +1,18 @@
 """Entry point for ``python -m dcsim``.
 
-Runs all 4 demo scenarios, prints a summary, and optionally generates an HTML report.
+Runs all 4 demo scenarios, prints a summary, and generates one HTML per scenario.
 
 Usage:
-    python -m dcsim                   # run and print summary
-    python -m dcsim --html report.html  # also write Plotly HTML report
-    python -m dcsim --scenario baseline # run a single scenario
+    python -m dcsim                       # run all, print summary
+    python -m dcsim --html output_dir     # also write per-scenario HTML reports
+    python -m dcsim --scenario baseline   # run a single scenario
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
+import os
+import webbrowser
 
 from dcsim.demo import (
     ScenarioResult,
@@ -39,15 +40,21 @@ def main() -> None:
     )
     parser.add_argument(
         "--html",
-        metavar="PATH",
+        metavar="DIR",
         default=None,
-        help="Write Plotly HTML report to PATH",
+        help="Write per-scenario HTML reports to DIR (created if needed)",
     )
     parser.add_argument(
         "--scenario",
         choices=list(SCENARIOS.keys()) + ["all"],
         default="all",
         help="Run a specific scenario or all (default: all)",
+    )
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        default=False,
+        help="Open HTML reports in browser after generation",
     )
     args = parser.parse_args()
 
@@ -58,27 +65,78 @@ def main() -> None:
     else:
         results = [SCENARIOS[args.scenario]()]
 
-    # Print summary
     print_summary(results)
 
-    # Generate HTML report if requested
+    # Generate one HTML per scenario
     if args.html:
         from dcsim.visualize import generate_report
 
-        # Combine all timelines for the report
-        all_entries = []
+        out_dir = args.html
+        os.makedirs(out_dir, exist_ok=True)
+
+        paths: list[str] = []
         for r in results:
-            all_entries.extend(r.timeline)
+            slug = r.name.lower().replace(" ", "_").replace("(", "").replace(")", "")
+            slug = slug.replace("/", "_").replace(",", "")
+            filename = f"{slug}.html"
+            path = os.path.join(out_dir, filename)
+            generate_report(r.timeline, output_path=path, title=f"DCSim: {r.name}")
+            paths.append(path)
+            print(f"  {r.name:<35} -> {path}")
 
-        # Sort by timestamp
-        all_entries.sort(key=lambda e: e.timestamp)
+        # Generate an index page linking to all scenario pages
+        index_path = os.path.join(out_dir, "index.html")
+        _write_index(index_path, results, paths)
+        print(f"\n  Index page -> {index_path}")
 
-        title = "DCSim Simulation Report"
-        if args.scenario != "all":
-            title = f"DCSim: {results[0].name}"
+        if args.open:
+            webbrowser.open(f"file://{os.path.abspath(index_path)}")
 
-        output = generate_report(all_entries, output_path=args.html, title=title)
-        print(f"HTML report written to: {output}")
+
+def _write_index(path: str, results: list[ScenarioResult], html_paths: list[str]) -> None:
+    """Write a simple index.html that links to each scenario report."""
+    lines = [
+        "<html><head><title>DCSim: Chaos Engineering Demo</title>",
+        "<style>",
+        "  body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }",
+        "  h1 { border-bottom: 2px solid #333; padding-bottom: 10px; }",
+        "  table { border-collapse: collapse; width: 100%; margin: 20px 0; }",
+        "  th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #ddd; }",
+        "  th { background: #2c3e50; color: white; }",
+        "  tr:hover { background: #f5f5f5; }",
+        "  a { color: #2980b9; text-decoration: none; font-weight: 600; }",
+        "  a:hover { text-decoration: underline; }",
+        "  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }",
+        "  .ok { background: #d4edda; color: #155724; }",
+        "  .warn { background: #fff3cd; color: #856404; }",
+        "</style></head><body>",
+        "<h1>DCSim: Datacenter Chaos Engineering</h1>",
+        "<p>32 GPUs (4 nodes x 8 GPUs) running 10 AllReduce training iterations. "
+        "Baseline iteration = 100ms compute + 50ms comms = 150ms.</p>",
+        "<table>",
+        "<tr><th>Scenario</th><th>Result</th><th>Steps</th><th>Time</th><th>Impact</th></tr>",
+    ]
+
+    baseline_time = results[0].final_time_us if results else 1_500_000
+    for r, hp in zip(results, html_paths):
+        fname = os.path.basename(hp)
+        time_ms = r.final_time_us / 1_000
+        overhead = ((r.final_time_us - baseline_time) / baseline_time * 100) if baseline_time else 0
+        tag = '<span class="tag ok">clean</span>' if overhead == 0 else f'<span class="tag warn">+{overhead:.0f}%</span>'
+        lines.append(
+            f'<tr><td><a href="{fname}">{r.name}</a></td>'
+            f"<td>{r.workload_state}</td>"
+            f"<td>{r.steps_completed}/{r.total_steps}</td>"
+            f"<td>{time_ms:.0f} ms</td>"
+            f"<td>{tag}</td></tr>"
+        )
+
+    lines.append("</table>")
+    lines.append("<p><em>Click a scenario name to see the detailed GPU timeline, iteration durations, and event log.</em></p>")
+    lines.append("</body></html>")
+
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
 
 
 if __name__ == "__main__":

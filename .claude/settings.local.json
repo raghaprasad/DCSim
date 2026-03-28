@@ -13,7 +13,8 @@
       "Bash(python -m pytest tests/test_engine.py -v)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git commit -m \"Phase 1: Core simulation engine + project structure:*)"
+      "Bash(git commit -m \"Phase 1: Core simulation engine + project structure:*)",
+      "Bash(git commit -m \"Hackathon scope: update CLAUDE.md with simplified 4-agent plan:*)"
     ]
   }
 }

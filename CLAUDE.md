@@ -1,66 +1,89 @@
 # DCSim: Datacenter Chaos Engineering Simulator
 
-## Project Overview
+## HACKATHON MODE — Simplified Scope
 
-A discrete event simulator modeling datacenter hardware failures and their impact on AI training/inference workloads. Python 3.13+ backend, React/TypeScript frontend.
+Single-command demo: `python -m dcsim.demo` runs 4 scenarios (baseline + 3 chaos), generates an interactive Plotly HTML report, and opens it in the browser.
+
+### What's IN scope
+- Engine (Phase 1) — DONE
+- Hardware graph with fixed 32-GPU topology (Phase 2)
+- AllReduce training workload only (Phase 4, simplified)
+- Manual chaos injection only (Phase 5, simplified)
+- Event logger (Phase 5, simplified)
+- Demo runner + Plotly visualization (NEW)
+
+### What's CUT
+- ~~Scheduler module~~ — hardcode: all 32 GPUs assigned to the one training job
+- ~~Inference workload~~ — training only
+- ~~Failure distributions~~ — manual chaos events only
+- ~~API layer (FastAPI/WebSocket)~~ — not needed, direct Python execution
+- ~~Frontend (React)~~ — Plotly HTML charts instead
+- ~~SchedulerStrategy / ResourcePool~~ — no multi-job, no queuing
 
 ## Setup
 
 ```bash
 cd /Users/raghaprasad/Workspaces/proto
 source .venv/bin/activate
-pip install -e ".[dev]"        # Core + test deps
-pip install -e ".[api]"        # Add FastAPI/WebSocket deps (Phase 6)
-pytest tests/ -v               # Run all tests
+pip install -e ".[dev]"
+pytest tests/ -v
 ```
 
-## Architecture
-
-Six backend layers, each event-driven, communicating only through the engine's event system:
-
+## Project Structure
 ```
-Engine (Phase 1) ← COMPLETE
-  ↓
-Hardware Graph (Phase 2)
-  ↓
-Scheduler (Phase 3)         Chaos + Observer (Phase 5)
-  ↓                           ↓
-Workloads (Phase 4)         (hooks into engine)
-  ↓
-API (Phase 6) → Frontend (Phase 7)
+src/dcsim/
+  engine/              # DONE — do not modify
+    clock.py           # SimTime, MILLISECOND, SECOND
+    event.py           # Event, EventPayload, EventQueue
+    loop.py            # SimulationLoop, SimulationContext
+  hardware/            # Agent A
+    components.py      # GPU, Switch, Link, state enums
+    topology.py        # build_standard_cluster() → 4 nodes x 8 GPUs
+    graph.py           # HardwareGraph wrapping NetworkX
+  workloads/           # Agent B
+    base.py            # Workload ABC, WorkloadManager
+    allreduce.py       # AllReduceTraining
+  chaos/               # Agent C
+    injector.py        # ChaosInjector (manual only)
+  observer/            # Agent C
+    logger.py          # EventLogger
+  demo.py              # Agent D — single-command demo runner
+  visualize.py         # Agent D — Plotly chart generation
+tests/
+  test_engine.py       # DONE — 14 tests passing
+  test_hardware.py     # Agent A
+  test_workloads.py    # Agent B
+  test_integration.py  # Agent D — demo scenario validation
 ```
 
 ## Time Model
 
-All times are integer **microseconds** (`SimTime = int`). Use constants from `dcsim.engine.clock`:
-- `MICROSECOND = 1`
-- `MILLISECOND = 1_000`
-- `SECOND = 1_000_000`
-
-The demo scenarios use **milliseconds** as the human unit. So "100ms compute phase" = `100 * MILLISECOND` = `100_000` in SimTime.
+All times are integer **microseconds** (`SimTime = int`).
+- `MICROSECOND = 1`, `MILLISECOND = 1_000`, `SECOND = 1_000_000`
+- Demo uses milliseconds as human unit: "100ms compute" = `100_000` SimTime
+- Import from `dcsim.engine.clock`
 
 ## Event Priority Tiers
 
-Events at the same timestamp fire in priority order. **Lower number = fires first.**
+Lower number = fires first at same timestamp.
 
 | Priority | Tier | Examples |
 |----------|------|---------|
 | 0 | Hardware state transitions | `hardware.gpu.fail`, `hardware.link.fail` |
-| 10 | Cascade propagation | `cascade.link.down`, `cascade.gpu.isolated` |
-| 20 | Scheduler reactions | `scheduler.job.start`, `scheduler.job.interrupt` |
-| 30 | Workload state changes | `workload.phase.complete`, `workload.step.complete` |
+| 10 | Cascade propagation | `cascade.gpu.job_interrupted`, `cascade.gpu.throttled` |
+| 20 | Workload reactions | `workload.phase.start` |
+| 30 | Workload progress | `workload.phase.complete`, `workload.step.complete` |
 | 40 | Observer/metrics | `system.metrics.sample` |
 
 ---
 
-# PHASE 1: ENGINE — COMPLETE (reference for all agents)
+# PHASE 1: ENGINE — COMPLETE
 
-All phases import from `dcsim.engine`. Here is the exact API:
+All agents import from `dcsim.engine`. Here is the exact implemented API:
 
 ### `dcsim.engine.clock`
 ```python
 SimTime = int  # Microseconds
-
 MICROSECOND: SimTime = 1
 MILLISECOND: SimTime = 1_000
 SECOND: SimTime = 1_000_000
@@ -76,7 +99,7 @@ class SimulationClock:
 @dataclass
 class EventPayload:
     event_type: str
-    parent_event_id: str | None = None     # Causal chain link
+    parent_event_id: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
     def describe(self) -> str
 
@@ -85,7 +108,7 @@ class Event:
     time: SimTime
     priority: int
     sequence: int
-    event_id: str           # (compare=False) unique ID
+    event_id: str           # (compare=False)
     payload: EventPayload   # (compare=False)
 
 class EventQueue:
@@ -95,7 +118,6 @@ class EventQueue:
     def pop(self) -> Event | None
     def peek(self) -> Event | None
     def is_empty(self) -> bool
-    def __len__(self) -> int
 ```
 
 ### `dcsim.engine.loop`
@@ -103,309 +125,269 @@ class EventQueue:
 EventHandler = Callable[[Event, SimulationContext], list[EventPayload] | None]
 
 class SimulationContext:
-    clock: SimulationClock   # read-only
+    clock: SimulationClock
     queue: EventQueue
-
-class SimulationResult:
-    events_processed: int
-    final_time: SimTime
-    stopped_by_max_time: bool
-    stopped_by_empty_queue: bool
+    # Phases add attributes: hardware, workload_manager, logger
 
 class SimulationLoop:
     clock: SimulationClock      # property
     queue: EventQueue           # property
     context: SimulationContext  # property
-
     def register_handler(self, event_type: str, handler: EventHandler) -> None
     def schedule(self, time: SimTime, payload: EventPayload, priority: int = 0) -> Event
     def step(self) -> bool
     def run(self, until: SimTime | None = None) -> SimulationResult
-    def pause(self) -> None
 ```
 
-**Key behavior**: When a handler returns `list[EventPayload]`, those payloads are scheduled at the *current sim time* with priority 0. Their `parent_event_id` is auto-set to the triggering event's ID if not already set. For future-time events, schedule directly via `ctx.queue.schedule(...)`.
+**Key behavior**: Returned `list[EventPayload]` from handlers are scheduled at *current sim time* with priority 0. `parent_event_id` is auto-set to triggering event's ID.
 
 ---
 
-# PHASE 2: HARDWARE GRAPH & STATE MACHINES
+# AGENT A: HARDWARE GRAPH (Phase 2)
 
-**Package**: `dcsim.hardware` — `components.py`, `topology.py`, `graph.py`
-**Depends on**: Phase 1 (engine) only
+**Files**: `src/dcsim/hardware/components.py`, `topology.py`, `graph.py`
 **Tests**: `tests/test_hardware.py`
+**Depends on**: Phase 1 only
 
-### What to build
+### `components.py` — State enums and component dataclasses
 
-**`components.py`** — Hardware component state machines
+```python
+class GPUState(Enum): IDLE, IN_USE, THROTTLED, FAILED
+class LinkState(Enum): UP, DEGRADED, DOWN
+class SwitchState(Enum): ACTIVE, DEGRADED, FAILED
+class LinkType(Enum): NVLINK, INFINIBAND
 
-State enums:
-- `GPUState`: IDLE, IN_USE, THROTTLED, FAILED
-- `LinkState`: UP, DEGRADED, DOWN
-- `SwitchState`: ACTIVE, DEGRADED, FAILED
-- `LinkType`: NVLINK (intra-node), INFINIBAND (inter-node)
+@dataclass
+class HardwareComponent:
+    id: str
+    component_type: str  # "gpu", "switch", "link"
+    state: GPUState | LinkState | SwitchState
 
-Component dataclasses (all inherit from `HardwareComponent`):
-- `GPU`: id, node_id, gpu_index, state=IDLE, compute_tflops=312.0, memory_gb=80.0, throttle_factor=1.0
-- `Link`: id, source_id, target_id, link_type, bandwidth_gbps, latency_us, state=UP
-- `Switch`: id, tier (0=ToR, 1=spine), port_count=64, state=ACTIVE
+class GPU(HardwareComponent):
+    node_id: str
+    gpu_index: int
+    state: GPUState = GPUState.IDLE
+    throttle_factor: float = 1.0  # 1.0 = full speed, 0.33 = thermal throttle
 
-State machine: define valid transitions per component type. Each transition has:
-- from_state, to_state, triggering event_type
-- Optional side_effects: list of event types to emit
+class Switch(HardwareComponent):
+    tier: int  # 0=ToR, 1=spine
+    state: SwitchState = SwitchState.ACTIVE
 
-Key GPU transitions:
-- IDLE→IN_USE via `scheduler.gpu.allocate`
-- IN_USE→IDLE via `scheduler.gpu.release`
-- any→FAILED via `hardware.gpu.fail` (side effect: `cascade.gpu.job_interrupted` if was IN_USE)
-- FAILED→IDLE via `hardware.gpu.repair`
-- IN_USE→THROTTLED via `hardware.gpu.throttle` (side effect: `cascade.gpu.throttled`)
-- THROTTLED→IN_USE via `hardware.gpu.unthrottle`
+class Link(HardwareComponent):
+    source_id: str
+    target_id: str
+    link_type: LinkType
+    bandwidth_gbps: float      # 7200 for NVLink, 400 for IB
+    latency_us: float          # 0.1 for NVLink, 1.0 for IB
+    state: LinkState = LinkState.UP
+```
 
-**`topology.py`** — Topology builders
+### `topology.py` — Fixed 32-GPU cluster
 
-`TopologyBuilder.single_node(num_gpus=8)` → HardwareGraph
-- 1 node, N GPUs, all-to-all NVLink connections
+```python
+def build_standard_cluster() -> HardwareGraph:
+    """4 nodes x 8 GPUs, 2 ToR switches, 2 spine switches.
 
-`TopologyBuilder.fat_tree(num_nodes=8, gpus_per_node=8)` → HardwareGraph
-- Intra-node: NVLink all-to-all (bandwidth=7200 Gbps, latency=0.1us)
-- Each node has a NIC connecting to a ToR switch via InfiniBand (400 Gbps, 1.0us)
-- ToR switches connect to spine switches
-- For 4 nodes: 1 ToR per node, 2 spine switches, full mesh at spine tier
-- For 8 nodes: 2 racks of 4, each rack has 1 ToR, 2 spine switches
+    Node 0,1 → ToR tor-0 (rack 0)
+    Node 2,3 → ToR tor-1 (rack 1)
+    tor-0, tor-1 → spine-0, spine-1 (full mesh)
 
-GPU naming: `"node-{n}/gpu-{g}"` (e.g., `"node-0/gpu-3"`)
-Switch naming: `"tor-{r}"`, `"spine-{s}"`
-Link naming: `"link-{source}-{target}"`
+    Intra-node: NVLink all-to-all (7200 Gbps, 0.1us)
+    Node-to-ToR: InfiniBand (400 Gbps, 1.0us)
+    ToR-to-Spine: InfiniBand (400 Gbps, 1.0us)
+    """
+```
 
-**`graph.py`** — HardwareGraph wrapping NetworkX
+GPU naming: `"node-{n}/gpu-{g}"` → `node-0/gpu-0` through `node-3/gpu-7`
+Switch naming: `"tor-0"`, `"tor-1"`, `"spine-0"`, `"spine-1"`
+
+### `graph.py` — HardwareGraph
 
 ```python
 class HardwareGraph:
-    def add_component(self, component: HardwareComponent) -> None
-    def add_link(self, link: Link) -> None
+    # Wraps networkx.Graph
+    def add_component(self, c: HardwareComponent)
+    def add_link(self, link: Link)
     def get_component(self, id: str) -> HardwareComponent
     def get_gpus(self, state: GPUState | None = None) -> list[GPU]
-    def get_available_gpus(self) -> list[GPU]  # state == IDLE
-    def get_links_for(self, component_id: str) -> list[Link]
-    def get_path(self, src: str, dst: str) -> list[str]
-    def get_operational_path(self, src: str, dst: str) -> list[str] | None
-    def get_bandwidth_between(self, src: str, dst: str) -> float  # bottleneck bw
-    def get_affected_components(self, failed_id: str) -> list[HardwareComponent]
-    def apply_failure(self, component_id: str, queue: EventQueue, now: SimTime) -> list[Event]
-    def apply_state_change(self, component_id: str, new_state, queue: EventQueue, now: SimTime) -> list[Event]
+    def get_bandwidth_between(self, src: str, dst: str) -> float  # bottleneck
+    def apply_state_change(self, component_id: str, new_state, event: Event, queue: EventQueue, now: SimTime) -> list[Event]
 ```
+
+**Critical**: `apply_state_change` handles cascades:
+- Switch fails → all connected links go DOWN → emit `cascade.link.down` (priority 10)
+- GPU fails while IN_USE → emit `cascade.gpu.job_interrupted` (priority 10)
+- GPU throttled while IN_USE → emit `cascade.gpu.throttled` (priority 10)
+- Link fails → if it isolates GPUs from each other, emit `cascade.gpu.isolated` (priority 10)
+- Link repair → recalculate connectivity
+
+**Register event handlers** with the SimulationLoop for:
+- `hardware.gpu.fail` → set GPU FAILED, cascade
+- `hardware.gpu.repair` → set GPU IDLE
+- `hardware.gpu.throttle` → set GPU THROTTLED, update throttle_factor from event data
+- `hardware.gpu.unthrottle` → set GPU back to IN_USE, reset throttle_factor=1.0
+- `hardware.link.fail` → set Link DOWN, cascade
+- `hardware.link.repair` → set Link UP
+- `hardware.switch.fail` → set Switch FAILED, cascade connected links
 
 ### Gating tests (6 tests)
-1. Single node: 8 GPUs, correct links, all paths exist
-2. Fat-tree: 4 nodes, correct switch/link counts, full connectivity
-3. GPU state machine: valid transitions work, invalid raise errors
-4. Switch failure cascade: ToR fails → GPUs on that node lose external connectivity
-5. Link failure: one spine link down → reduced bandwidth, connectivity maintained
-6. Engine integration: schedule switch_fail event → cascade events fire in correct priority order
+1. `build_standard_cluster()`: 32 GPUs, 4 switches, correct link counts
+2. Any GPU can reach any other GPU (path exists)
+3. GPU state transitions: IDLE→IN_USE→THROTTLED→FAILED→IDLE work; invalid transitions raise
+4. ToR switch failure: GPUs on that rack lose cross-rack connectivity
+5. Spine link failure: reduced bandwidth but connectivity maintained
+6. Engine integration: schedule `hardware.gpu.fail` → cascade events fire in priority order
 
 ---
 
-# PHASE 3: ORCHESTRATION LAYER
+# AGENT B: ALLREDUCE WORKLOAD (Phase 4, simplified)
 
-**Package**: `dcsim.scheduler` — `scheduler.py`, `allocation.py`
-**Depends on**: Phase 1 (engine), Phase 2 (hardware interfaces)
-**Tests**: `tests/test_scheduler.py`
-
-### What to build
-
-**`allocation.py`** — Resource pool
-```python
-@dataclass
-class GPUAllocation:
-    job_id: str
-    gpu_ids: list[str]
-    allocated_at: SimTime
-    released_at: SimTime | None = None
-
-class ResourcePool:
-    def allocate(self, job_id: str, gpu_ids: list[str], now: SimTime) -> GPUAllocation
-    def release(self, job_id: str, now: SimTime) -> list[str]
-    def get_job_for_gpu(self, gpu_id: str) -> str | None
-    def get_allocation(self, job_id: str) -> GPUAllocation | None
-    def get_free_gpu_ids(self, graph: HardwareGraph) -> list[str]
-```
-
-**`scheduler.py`** — Event-driven scheduler
-```python
-@dataclass
-class JobRequest:
-    job_id: str
-    workload_type: str        # "allreduce_training", "inference"
-    gpu_count: int
-    priority: int = 0
-    submitted_at: SimTime = 0
-    workload_config: dict = field(default_factory=dict)
-
-class SchedulerStrategy(Protocol):
-    def select_gpus(self, job: JobRequest, pool: ResourcePool, graph: HardwareGraph) -> list[str] | None
-
-class SimpleScheduler(SchedulerStrategy):
-    # FIFO, best-fit: prefer GPUs on same node, then same rack
-
-class Scheduler:
-    # Registers these event handlers with SimulationLoop:
-    # "scheduler.job.submit"     → try allocate → emit "scheduler.job.start" or queue
-    # "scheduler.gpu.available"  → try schedule pending
-    # "cascade.gpu.job_interrupted" → release allocation, re-queue job
-    # "workload.job.complete"    → release GPUs, try schedule pending
-```
-
-The scheduler emits `scheduler.gpu.allocate` events (priority 20) that the hardware layer uses to transition GPUs IDLE→IN_USE. It emits `scheduler.job.start` (priority 20) that the workload layer listens for.
-
-### Gating tests (5 tests)
-1. Submit 4-GPU job on 8-GPU node → 4 GPUs become IN_USE
-2. Two 8-GPU jobs on 8-GPU system → first starts, second queues, first completes → second starts
-3. GPU failure during job → job_interrupted fires, GPUs released
-4. After interruption → job re-queued and starts when GPUs available
-5. Multi-node: scheduler prefers co-located GPUs
-
----
-
-# PHASE 4: WORKLOADS
-
-**Package**: `dcsim.workloads` — `base.py`, `allreduce.py`, `inference.py`
-**Depends on**: Phase 1 (engine), Phase 2 (hardware), Phase 3 (scheduler)
+**Files**: `src/dcsim/workloads/base.py`, `allreduce.py`
 **Tests**: `tests/test_workloads.py`
+**Depends on**: Phase 1 engine + Phase 2 hardware interfaces
 
-### What to build
+### Simplified model (no scheduler)
 
-**`base.py`** — Workload ABC and WorkloadManager
+The WorkloadManager directly assigns ALL GPUs to the training job at t=0. No scheduler module needed.
+
+### `base.py`
+
 ```python
 class WorkloadPhase(Enum):
     COMPUTE = "compute"
     COMMUNICATE = "communicate"
-    CHECKPOINT = "checkpoint"
 
 @dataclass
-class PhaseSpec:
-    phase_type: WorkloadPhase
-    duration_us: SimTime          # base duration before adjustments
-    gpu_ids: list[str] | None = None
-    payload_bytes: int = 0
-
 class Workload(ABC):
     job_id: str
     gpu_ids: list[str]
     current_step: int = 0
-    total_steps: int
-    state: str  # "pending", "running", "interrupted", "completed", "failed"
+    total_steps: int = 10
+    state: str = "pending"  # "pending", "running", "interrupted", "completed"
 
     @abstractmethod
-    def get_next_phase(self, graph: HardwareGraph, now: SimTime) -> PhaseSpec | None
-    @abstractmethod
-    def on_gpu_failed(self, gpu_id: str, graph: HardwareGraph, now: SimTime) -> WorkloadReaction
-    @abstractmethod
-    def compute_phase_duration(self, phase: PhaseSpec, graph: HardwareGraph) -> SimTime
+    def get_next_phase(self, graph, now) -> tuple[WorkloadPhase, SimTime] | None
+        # Returns (phase_type, duration) or None if done
 
-@dataclass
-class WorkloadReaction:
-    action: str  # "abort", "degrade"
-    events: list[EventPayload] = field(default_factory=list)
+    @abstractmethod
+    def on_gpu_failed(self, gpu_id: str) -> str
+        # Returns "abort" or "continue"
 
 class WorkloadManager:
-    # Event handlers registered with SimulationLoop:
-    # "scheduler.job.start"      → create Workload, schedule first phase
-    # "workload.phase.complete"  → advance step, schedule next phase or emit job_complete
-    # "cascade.gpu.job_interrupted" → cancel pending phase, call workload.on_gpu_failed
+    """Wires workloads into the event loop. No scheduler — directly assigns GPUs."""
+
+    def setup(self, sim: SimulationLoop, workload: Workload, graph: HardwareGraph):
+        # 1. Set all workload GPUs to IN_USE
+        # 2. Register handlers for workload.phase.complete, cascade.gpu.job_interrupted, cascade.gpu.throttled
+        # 3. Schedule first phase at t=0
+
+    # Handler: workload.phase.complete
+    #   → advance to next phase, schedule its completion event
+    #   → if all steps done, emit workload.job.complete
+
+    # Handler: cascade.gpu.job_interrupted
+    #   → cancel pending phase completion event
+    #   → set workload state = "interrupted"
+    #   → emit workload.job.failed with data including last_step
+
+    # Handler: cascade.gpu.throttled
+    #   → cancel pending phase completion event
+    #   → recalculate current phase duration with new throttle_factor
+    #   → reschedule phase completion at adjusted time
+
+    # Handler: hardware.gpu.repair (for resumption after XID failure)
+    #   → if workload is interrupted and all GPUs now healthy
+    #   → resume from last_checkpoint_step, schedule first phase
 ```
 
-**`allreduce.py`** — Training workload
-
-Each training step = COMPUTE (forward) → COMMUNICATE (allreduce) → COMPUTE (backward). Every K steps: CHECKPOINT.
+### `allreduce.py`
 
 ```python
 class AllReduceTraining(Workload):
-    base_compute_us: SimTime        # User-configurable per-step compute time
-    gradient_size_bytes: int
-    checkpoint_interval: int = 0    # 0 = no checkpointing
-    checkpoint_duration_us: SimTime = 0
-    last_checkpoint_step: int = 0   # resume point after failure
+    base_compute_us: SimTime = 100_000   # 100ms default
+    comms_duration_us: SimTime = 50_000  # 50ms default (pre-calculated)
+    # For hackathon: comms_duration is a direct parameter, not calculated from gradient size
 
-    # compute_phase_duration:
-    #   COMPUTE → base_compute_us / min(throttle_factor) across all GPUs
-    #   COMMUNICATE → 2 * (N-1)/N * gradient_size_bytes * 8 / bottleneck_bandwidth_gbps / 1000
-    #   CHECKPOINT → checkpoint_duration_us
-    #
-    # on_gpu_failed → abort (training needs all GPUs)
-    # On reschedule: resume from last_checkpoint_step
+    def get_next_phase(self, graph, now):
+        if self.current_step >= self.total_steps:
+            return None
+        # Alternates: COMPUTE then COMMUNICATE
+        # On COMPUTE: duration = base_compute_us / min(throttle_factor)
+        # On COMMUNICATE: duration = comms_duration_us
+        # After COMMUNICATE completes: current_step += 1
 ```
 
-**`inference.py`** — Inference workload
-```python
-class InferenceWorkload(Workload):
-    base_compute_us: SimTime
-    active_replicas: int
-    min_replicas: int = 1
-    # Runs until simulation time limit
-    # on_gpu_failed → degrade if active_replicas >= min_replicas, else abort
-```
+**Key simplification**: `comms_duration_us` is a direct config parameter (50ms), not derived from gradient_size / bandwidth. This avoids needing the graph's bandwidth calculations for the basic demo. The graph is still used for throttle_factor lookups.
 
-### Key timing formulas
+### Training step cycle
+```
+COMPUTE (100ms) → COMMUNICATE (50ms) → step++ → COMPUTE → COMMUNICATE → ...
+```
+Each step = 1 compute + 1 communicate = 150ms baseline.
 
-**Compute phase** (training, per-step):
-```
-actual_duration = base_compute_us / min(gpu.throttle_factor for gpu in allocated_gpus)
-```
-Training is synchronous — slowest GPU dominates. A GPU with throttle_factor=0.33 makes compute take 3x longer.
+### Handling chaos events
 
-**AllReduce communication phase**:
-```
-actual_duration = 2 * (N-1)/N * gradient_size_bytes * 8 / bottleneck_bandwidth_gbps / 1000
-```
-Where bottleneck_bandwidth = minimum bandwidth along any path between GPU pairs. Units: gradient in bytes, bandwidth in Gbps, result in microseconds.
+**Thermal throttle** (Test Case 1):
+- `cascade.gpu.throttled` fires → WorkloadManager cancels pending phase completion
+- Recalculates: if in COMPUTE phase and GPU throttle_factor=0.33, remaining compute time = `base_compute_us / 0.33` minus time already elapsed
+- Reschedules phase completion at new time
+- All other GPUs complete their compute normally but must wait for the slow GPU before allreduce starts (training is synchronous)
+- **The sync barrier is implicit**: the COMMUNICATE phase only starts after COMPUTE completes, and COMPUTE duration is governed by the slowest GPU
 
-### Gating tests (6 tests)
-1. AllReduce timing: 8 GPUs, known bandwidth → duration matches formula
-2. 10-step training on healthy hardware → 10 steps complete, progress 0→1
-3. GPU failure mid-compute → job aborts, pending phase cancelled
-4. Throttled GPU (0.5x) → compute phases take 2x longer
-5. Inference: 4 replicas, fail 1 GPU → degrades to 3, continues
-6. Inference: 4 replicas, min=3, fail 2 → abort
+**Link flap** (Test Case 2):
+- `hardware.link.fail` during COMMUNICATE phase → cancel pending phase completion
+- Comms is blocked until link is restored
+- `hardware.link.repair` → resume comms phase, add penalty time for rerouting overhead
+- Event data should include `{"reroute_penalty_us": 10_000}` (10ms)
+
+**XID failure** (Test Case 3):
+- `cascade.gpu.job_interrupted` → cancel pending phase, workload state="interrupted"
+- `hardware.gpu.repair` event scheduled at t+10,000,000us (10s) by chaos injector
+- On repair, WorkloadManager resumes workload from current_step (no checkpoint complexity for hackathon — just resume where you left off)
+
+### Gating tests (5 tests)
+1. Baseline: 32 GPUs, 10 steps, no chaos → completes at t=1,500,000us (1500ms)
+2. Throttle: GPU throttled to 0.33 at t=320ms → compute takes 3x, total > 1500ms
+3. Link flap: link down at t=160ms, up at t=200ms → comms delayed, total > 1500ms
+4. XID failure: GPU fails at t=460ms → 10s gap → training resumes
+5. Step counting: verify exactly 10 step.complete events in baseline
 
 ---
 
-# PHASE 5: CHAOS MONKEY & OBSERVER
+# AGENT C: CHAOS INJECTOR & EVENT LOGGER (Phase 5, simplified)
 
-**Package**: `dcsim.chaos` — `injector.py`, `distributions.py`; `dcsim.observer` — `logger.py`, `metrics.py`
-**Depends on**: Phase 1 (engine), Phase 2 (hardware)
+**Files**: `src/dcsim/chaos/injector.py`, `src/dcsim/observer/logger.py`
 **Tests**: `tests/test_chaos.py`, `tests/test_observer.py`
+**Depends on**: Phase 1 engine only
 
-### What to build
+### `injector.py` — Manual chaos only
 
-**`injector.py`** — Chaos monkey
 ```python
 @dataclass
 class ChaosEvent:
-    target_id: str           # Component ID (e.g., "node-2/gpu-4")
-    event_type: str          # "hardware.gpu.fail", "hardware.gpu.throttle", etc.
-    time: SimTime            # When to inject
-    duration: SimTime | None = None  # Auto-repair after duration (None = permanent)
-    properties: dict = field(default_factory=dict)  # e.g., {"throttle_factor": 0.33}
+    target_id: str              # "node-1/gpu-4", "tor-0", "link-tor-0-spine-0"
+    event_type: str             # "hardware.gpu.fail", "hardware.gpu.throttle", etc.
+    time: SimTime               # When to inject
+    duration: SimTime | None    # Auto-repair after this (None = permanent)
+    properties: dict = field(default_factory=dict)  # {"throttle_factor": 0.33}
 
 class ChaosInjector:
-    def inject_manual(self, events: list[ChaosEvent], queue: EventQueue) -> list[Event]
-        # Schedule each ChaosEvent into the sim queue
-        # If duration set, also schedule the corresponding repair event
-    def inject_from_distribution(self, dist, components, time_range, queue, rng) -> list[Event]
+    def inject(self, events: list[ChaosEvent], queue: EventQueue) -> list[Event]:
+        # For each ChaosEvent:
+        #   1. Schedule the failure event at chaos.time with priority 0
+        #   2. Put chaos properties into EventPayload.data
+        #   3. If duration is set, also schedule repair event at chaos.time + duration
+        # Return all scheduled Events
 ```
 
-**`distributions.py`** — Failure distributions
-```python
-class FailureDistribution(Protocol):
-    def sample_next_failure_time(self, rng: random.Random, now: SimTime) -> SimTime
-    def sample_repair_time(self, rng: random.Random) -> SimTime
+Repair event type mapping:
+- `hardware.gpu.fail` → repair is `hardware.gpu.repair`
+- `hardware.gpu.throttle` → repair is `hardware.gpu.unthrottle`
+- `hardware.link.fail` → repair is `hardware.link.repair`
+- `hardware.switch.fail` → repair is `hardware.switch.repair`
 
-class ExponentialFailure(FailureDistribution):
-    mtbf_us: SimTime
-    mttr_us: SimTime
-```
+### `logger.py` — Simple event logger
 
-**`logger.py`** — Event logger with causal chain tracking
 ```python
 @dataclass
 class LogEntry:
@@ -417,167 +399,144 @@ class LogEntry:
     job_id: str | None
     description: str
     data: dict
-    category: str  # "hardware", "scheduler", "workload", "chaos", "system"
 
 class EventLogger:
-    def log(self, entry: LogEntry) -> None
-    def get_timeline(self, start: SimTime = 0, end: SimTime | None = None) -> list[LogEntry]
-    def get_causal_chain(self, event_id: str) -> list[LogEntry]
-    def get_by_job(self, job_id: str) -> list[LogEntry]
-    def get_by_component(self, component_id: str) -> list[LogEntry]
+    entries: list[LogEntry]  # Public for easy access
+
+    def make_handler(self) -> EventHandler:
+        """Returns a handler that can be registered for ANY event type."""
+        # The handler creates a LogEntry from the event and appends it
+
+    def get_timeline(self) -> list[LogEntry]
     def export_json(self) -> str
+    def export_dicts(self) -> list[dict]  # For Plotly consumption
 ```
 
-**`metrics.py`** — Time-series metrics
+The logger registers a SINGLE handler for ALL event types. To do this, register it for each event type used in the simulation, OR modify the SimulationLoop to support a wildcard/catch-all handler.
+
+**Simpler approach**: The WorkloadManager and HardwareGraph call `logger.log(entry)` directly after processing events, rather than the logger being an event handler. This avoids the catch-all registration problem.
+
+### Gating tests (4 tests)
+1. ChaosInjector: schedule GPU fail at t=1000 → event fires at t=1000
+2. ChaosInjector: fail with duration=5000 → fail event + repair event scheduled
+3. EventLogger: log 5 entries → get_timeline returns them in order
+4. EventLogger: export_dicts returns list of dicts suitable for DataFrame construction
+
+---
+
+# AGENT D: DEMO RUNNER & VISUALIZATION
+
+**Files**: `src/dcsim/demo.py`, `src/dcsim/visualize.py`
+**Tests**: `tests/test_integration.py`
+**Depends on**: ALL agents above must be complete
+
+### `demo.py` — Entry point
+
+```bash
+python -m dcsim.demo              # Run all 4 scenarios, open HTML report
+python -m dcsim.demo --scenario baseline   # Run just one
+```
+
+Each scenario:
+1. Build the standard 32-GPU cluster
+2. Create AllReduceTraining workload (10 steps, 100ms compute, 50ms comms)
+3. Wire everything into SimulationLoop
+4. Inject chaos events (if any)
+5. Run simulation
+6. Collect logs
+7. Pass to visualizer
+
+### `visualize.py` — Plotly HTML report
+
+Generate a single HTML file with interactive Plotly charts:
+
+1. **GPU State Timeline** (Gantt/heatmap): Each GPU is a row, colored by state over time (green=computing, blue=communicating, yellow=throttled, red=failed, gray=idle/waiting). This is the money shot — visually shows 31 GPUs going gray while 1 is yellow.
+
+2. **Iteration Timeline** (bar chart): Each iteration as a bar showing compute + comms duration. Chaos-affected iterations visibly longer.
+
+3. **Event Log Table**: Timestamped table of key events (failures, recoveries, phase starts/completions).
+
+4. **Comparison View**: Side-by-side baseline vs chaos scenario showing iteration times.
+
+The HTML auto-opens in the browser via `webbrowser.open()`.
+
+**Add `plotly` to pyproject.toml dependencies.**
+
+### Demo scenarios (hardcoded in demo.py)
+
 ```python
-class MetricsCollector:
-    def record(self, name: str, time: SimTime, value: float) -> None
-    def get_series(self, name: str) -> list[tuple[SimTime, float]]
-    # Built-in: gpu_utilization, network_health, queue_depth, training_progress.<job_id>
+SCENARIOS = {
+    "baseline": [],  # No chaos events
+
+    "thermal_throttle": [
+        ChaosEvent("node-1/gpu-4", "hardware.gpu.throttle", 320 * MILLISECOND,
+                   duration=None, properties={"throttle_factor": 0.33})
+    ],
+
+    "link_flap": [
+        ChaosEvent("link-tor-0-spine-0", "hardware.link.fail", 160 * MILLISECOND,
+                   duration=40 * MILLISECOND)  # Recovers at t=200ms
+    ],
+
+    "xid_79": [
+        ChaosEvent("node-3/gpu-1", "hardware.gpu.fail", 460 * MILLISECOND,
+                   duration=10 * SECOND)  # 10s repair time
+    ],
+}
 ```
 
-The EventLogger and MetricsCollector register as event handlers. The logger captures every event. The MetricsCollector samples periodically via `system.metrics.sample` events.
+### Integration tests validate demo output
 
-### Gating tests (7 tests)
-1. Manual injection: GPU fail at t=1000 → fires at t=1000 with cascade
-2. Auto-repair: fail with duration=5000 → fail at t=1000, repair at t=6000
-3. Distribution: ExponentialFailure(mtbf=1e6) sampled 1000 times → mean ≈ 1e6
-4. Determinism: same seed twice → identical event logs
-5. Logging completeness: every event logged with correct timestamp/category
-6. Causal chain: switch failure → trace includes link failures, GPU isolation, job interruption
-7. Metrics: GPU failures → gpu_utilization drops at failure times
-
----
-
-# PHASE 6: API LAYER
-
-**Package**: `dcsim.api` — `server.py`, `routes.py`, `ws.py`, `models.py`
-**Depends on**: All phases above
-**Tests**: `tests/test_api.py`
-
-### REST endpoints
-```
-POST   /api/sessions                    Create session
-GET    /api/sessions                    List sessions
-GET    /api/sessions/{id}               Session details
-DELETE /api/sessions/{id}               Delete session
-POST   /api/sessions/{id}/configure     Set topology + workload + chaos
-POST   /api/sessions/{id}/run           Start simulation
-POST   /api/sessions/{id}/step          Single event step
-POST   /api/sessions/{id}/pause         Pause
-POST   /api/sessions/{id}/resume        Resume
-GET    /api/sessions/{id}/state         Hardware graph snapshot
-GET    /api/sessions/{id}/timeline      Event timeline (paginated)
-GET    /api/sessions/{id}/metrics       Metrics time-series
-POST   /api/sessions/{id}/chaos         Inject chaos mid-run
-GET    /api/topologies                  Topology presets
-GET    /api/workloads                   Workload types
-```
-
-### WebSocket — `WS /api/sessions/{id}/ws`
-Server → Client: `event`, `metrics_snapshot`, `state_snapshot`, `simulation_status`
-Client → Server: `subscribe`, `inject_chaos`
-
----
-
-# EVENT TYPE REGISTRY
-
-| Event Type | Priority | Emitted by | Consumed by |
-|---|---|---|---|
-| `hardware.gpu.fail` | 0 | Chaos | Hardware, Scheduler |
-| `hardware.gpu.repair` | 0 | Chaos | Hardware, Scheduler |
-| `hardware.gpu.throttle` | 0 | Chaos | Hardware, Workloads |
-| `hardware.gpu.unthrottle` | 0 | Chaos | Hardware, Workloads |
-| `hardware.switch.fail` | 0 | Chaos | Hardware |
-| `hardware.switch.repair` | 0 | Chaos | Hardware |
-| `hardware.link.fail` | 0 | Chaos | Hardware |
-| `hardware.link.repair` | 0 | Chaos | Hardware |
-| `cascade.link.down` | 10 | Hardware | Observer |
-| `cascade.gpu.isolated` | 10 | Hardware | Scheduler |
-| `cascade.gpu.job_interrupted` | 10 | Hardware | Scheduler, Workloads |
-| `cascade.gpu.throttled` | 10 | Hardware | Workloads |
-| `scheduler.job.submit` | 20 | API/Config | Scheduler |
-| `scheduler.job.start` | 20 | Scheduler | Workloads |
-| `scheduler.job.interrupt` | 20 | Scheduler | Workloads, Observer |
-| `scheduler.gpu.allocate` | 20 | Scheduler | Hardware |
-| `scheduler.gpu.release` | 20 | Scheduler | Hardware |
-| `scheduler.gpu.available` | 20 | Hardware | Scheduler |
-| `workload.phase.start` | 30 | Workloads | Observer |
-| `workload.phase.complete` | 30 | Workloads | Workloads (self) |
-| `workload.step.complete` | 30 | Workloads | Observer |
-| `workload.job.complete` | 30 | Workloads | Scheduler, Observer |
-| `workload.job.failed` | 30 | Workloads | Scheduler, Observer |
-| `system.metrics.sample` | 40 | Metrics | Metrics (self) |
-
----
-
-# DEMO SCENARIOS & E2E TESTS
-
-These are the target demo scenarios. The integration test file (`tests/test_integration.py`) must validate all of them.
-
-## Baseline Configuration
-- 32 GPUs (4 nodes x 8 GPUs)
-- 10 training iterations
-- Each iteration: 100ms compute + 50ms allreduce comms = 150ms/iteration
-- Baseline total: 1500ms (1.5s) for 10 iterations with no failures
-
-## Test Case 1: Thermal Throttle
-- Config: 32 GPUs, 10 iterations, 100ms compute, 50ms comms
-- Chaos: at t=320ms (during compute phase of iteration 3), GPU `node-1/gpu-4` gets thermal throttle with throttle_factor=0.33 (3x slowdown)
-- Expected: GPU 12 (node-1/gpu-4) compute takes 300ms instead of 100ms. Other 31 GPUs finish their compute at t=400ms and idle waiting for GPU 12 until ~t=480ms. The allreduce for iteration 3 starts late. Total time > 1500ms baseline
-- Validate: logs show 31 GPUs idle-waiting between t=400ms and t≈480ms
-
-## Test Case 2: Link Flap
-- Config: 32 GPUs, 10 iterations, 100ms compute, 50ms comms
-- Chaos: at t=160ms (during comms phase of iteration 1), rack-0 (node-0, node-1) uplink fails. Recovers at t=200ms
-- Expected: During t=160-200ms, rack-0 is isolated — allreduce cannot complete. After recovery, routing recalculation adds overhead. Comms phase takes longer than 50ms baseline
-- Validate: iteration 1 total > 150ms baseline
-
-## Test Case 3: XID 79 (GPU Hard Failure)
-- Config: 32 GPUs, 10 iterations, 100ms compute, 50ms comms
-- Chaos: at t=460ms, GPU `node-3/gpu-1` (G25) has XID error → hardware.gpu.fail
-- Expected: GPU fails → job interrupted → scheduler must find replacement GPU → 10,000ms (10s) penalty for detection + reboot + reload. Training resumes from last checkpoint after penalty
-- Validate: logs show ~10,000ms gap between failure and training resumption
-
-## Integration Test Structure
 ```python
-# tests/test_integration.py
-
 class TestBaseline:
-    """32 GPUs, 10 iterations, no failures. Total ≈ 1500ms."""
+    # Run baseline scenario
+    # Assert: 10 steps completed, total time ≈ 1,500,000us
 
 class TestThermalThrottle:
-    """Thermal throttle at t=320ms. Validate GPU idle-wait behavior."""
+    # Assert: total time > 1,500,000us
+    # Assert: events show GPU throttled at t=320ms
+    # Assert: iteration 3 compute phase > 100ms
 
 class TestLinkFlap:
-    """Link flap at t=160ms. Validate degraded comms phase."""
+    # Assert: total time > 1,500,000us
+    # Assert: events show link down at t=160ms, up at t=200ms
 
 class TestXID79:
-    """GPU hard failure at t=460ms. Validate 10s penalty and reschedule."""
+    # Assert: total time > 11,500,000us (baseline + ~10s penalty)
+    # Assert: events show GPU fail at t=460ms, repair at t≈10,460ms
 ```
 
 ---
 
-# SIMCONTEXT EXTENSION PATTERN
+# EVENT TYPE REGISTRY (simplified)
 
-`SimulationContext` currently has `clock` and `queue`. Each phase extends it:
-
-Phase 2 adds: `hardware: HardwareGraph`
-Phase 3 adds: `scheduler: Scheduler`
-Phase 4 adds: `workload_manager: WorkloadManager`
-Phase 5 adds: `logger: EventLogger`, `metrics: MetricsCollector`
-
-Each phase should modify `SimulationContext` to add its attribute. Use simple attribute assignment — no need for subclassing. Update `__slots__` or convert to a regular class if needed.
+| Event Type | Priority | Source → Consumer |
+|---|---|---|
+| `hardware.gpu.fail` | 0 | Chaos → Hardware |
+| `hardware.gpu.repair` | 0 | Chaos → Hardware, Workloads |
+| `hardware.gpu.throttle` | 0 | Chaos → Hardware |
+| `hardware.gpu.unthrottle` | 0 | Chaos → Hardware |
+| `hardware.link.fail` | 0 | Chaos → Hardware |
+| `hardware.link.repair` | 0 | Chaos → Hardware, Workloads |
+| `hardware.switch.fail` | 0 | Chaos → Hardware |
+| `cascade.gpu.job_interrupted` | 10 | Hardware → Workloads |
+| `cascade.gpu.throttled` | 10 | Hardware → Workloads |
+| `cascade.link.down` | 10 | Hardware → (logged) |
+| `workload.phase.start` | 30 | Workloads → (logged) |
+| `workload.phase.complete` | 30 | Workloads → Workloads |
+| `workload.step.complete` | 30 | Workloads → (logged) |
+| `workload.job.complete` | 30 | Workloads → (logged) |
+| `workload.job.failed` | 30 | Workloads → (logged) |
 
 ---
 
 # CONVENTIONS
 
-- All source in `src/dcsim/`, tests in `tests/`
+- All source: `src/dcsim/`, tests: `tests/`
 - Run tests: `source .venv/bin/activate && pytest tests/ -v`
-- GPU naming: `"node-{n}/gpu-{g}"` (e.g., `"node-0/gpu-3"`, `"node-3/gpu-7"`)
-- Switch naming: `"tor-{n}"` for ToR, `"spine-{s}"` for spine
+- GPU naming: `"node-{n}/gpu-{g}"` (node-0/gpu-0 through node-3/gpu-7)
+- Switch naming: `"tor-0"`, `"tor-1"`, `"spine-0"`, `"spine-1"`
 - Link naming: `"link-{source}-{target}"`
-- Event types use dotted namespace: `"hardware.gpu.fail"`, `"scheduler.job.start"`
-- All randomness via seeded `random.Random` (never `random.random()`)
-- Every handler receives `(event: Event, ctx: SimulationContext)` and returns `list[EventPayload] | None`
+- Event types: dotted namespace `"hardware.gpu.fail"`
+- All times in integer microseconds
+- `SimulationContext` has no `__slots__` — phases add attributes freely

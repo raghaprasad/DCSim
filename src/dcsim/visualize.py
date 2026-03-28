@@ -273,6 +273,151 @@ def _build_event_log_table(timeline: list[LogEntry]) -> go.Figure:
     return fig
 
 
+def _build_datacenter_svg(timeline: list[LogEntry]) -> str:
+    """Build an SVG diagram of the datacenter with affected components color-coded.
+
+    Layout:
+        spine-0  spine-1          (top, spine switches)
+         |  \\  /  |
+        tor-0    tor-1            (ToR switches)
+         |         |
+      +------+ +------+   +------+ +------+
+      |node-0| |node-1|   |node-2| |node-3|
+      | 8GPU | | 8GPU |   | 8GPU | | 8GPU |
+      +------+ +------+   +------+ +------+
+       \\__ rack 0 __/      \\__ rack 1 __/
+    """
+    # Determine which components were affected
+    failed_gpus: set[str] = set()
+    throttled_gpus: set[str] = set()
+    failed_links: set[str] = set()
+    failed_switches: set[str] = set()
+
+    for entry in timeline:
+        cid = entry.component_id or ""
+        if entry.event_type == "hardware.gpu.fail":
+            failed_gpus.add(cid)
+        elif entry.event_type == "hardware.gpu.throttle":
+            throttled_gpus.add(cid)
+        elif entry.event_type in ("hardware.link.fail", "cascade.link.down"):
+            failed_links.add(cid)
+        elif entry.event_type == "hardware.switch.fail":
+            failed_switches.add(cid)
+
+    def _gpu_color(node_idx: int, gpu_idx: int) -> str:
+        gid = f"node-{node_idx}/gpu-{gpu_idx}"
+        if gid in failed_gpus:
+            return "#e74c3c"  # red
+        if gid in throttled_gpus:
+            return "#f39c12"  # orange
+        return "#2ecc71"  # green
+
+    def _switch_color(switch_id: str) -> str:
+        if switch_id in failed_switches:
+            return "#e74c3c"
+        return "#3498db"
+
+    def _link_affected(link_id: str) -> bool:
+        return any(link_id in lid or lid in link_id for lid in failed_links)
+
+    # SVG dimensions
+    svg_w, svg_h = 720, 460
+    lines: list[str] = []
+    lines.append(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}" '
+                 f'style="max-width:{svg_w}px; font-family:-apple-system,sans-serif;">')
+
+    # Background
+    lines.append(f'<rect width="{svg_w}" height="{svg_h}" fill="#1a1a2e" rx="8"/>')
+
+    # --- Spine switches (top) ---
+    spine_y = 40
+    spine_positions = {"spine-0": 260, "spine-1": 460}
+    for sid, sx in spine_positions.items():
+        col = _switch_color(sid)
+        lines.append(f'<rect x="{sx-35}" y="{spine_y-15}" width="70" height="30" rx="4" fill="{col}" opacity="0.9"/>')
+        lines.append(f'<text x="{sx}" y="{spine_y+5}" text-anchor="middle" fill="white" font-size="11" font-weight="600">{sid}</text>')
+
+    # --- ToR switches ---
+    tor_y = 130
+    tor_positions = {"tor-0": 180, "tor-1": 540}
+    for tid, tx in tor_positions.items():
+        col = _switch_color(tid)
+        lines.append(f'<rect x="{tx-30}" y="{tor_y-15}" width="60" height="30" rx="4" fill="{col}" opacity="0.9"/>')
+        lines.append(f'<text x="{tx}" y="{tor_y+5}" text-anchor="middle" fill="white" font-size="11" font-weight="600">{tid}</text>')
+
+    # --- Spine-to-ToR links ---
+    for tid, tx in tor_positions.items():
+        for sid, sx in spine_positions.items():
+            lid = f"link-{tid}-{sid}"
+            stroke = "#e74c3c" if _link_affected(lid) else "#555"
+            sw = "3" if _link_affected(lid) else "1.5"
+            dash = 'stroke-dasharray="6,4"' if _link_affected(lid) else ""
+            lines.append(f'<line x1="{sx}" y1="{spine_y+15}" x2="{tx}" y2="{tor_y-15}" '
+                         f'stroke="{stroke}" stroke-width="{sw}" {dash}/>')
+
+    # --- Rack backgrounds ---
+    rack_y = 175
+    rack_h = 240
+    lines.append(f'<rect x="30" y="{rack_y}" width="300" height="{rack_h}" rx="6" fill="#16213e" stroke="#2c3e50" stroke-width="1.5"/>')
+    lines.append(f'<text x="180" y="{rack_y+20}" text-anchor="middle" fill="#7f8c8d" font-size="12" font-weight="600">RACK 0</text>')
+    lines.append(f'<rect x="390" y="{rack_y}" width="300" height="{rack_h}" rx="6" fill="#16213e" stroke="#2c3e50" stroke-width="1.5"/>')
+    lines.append(f'<text x="540" y="{rack_y+20}" text-anchor="middle" fill="#7f8c8d" font-size="12" font-weight="600">RACK 1</text>')
+
+    # --- Nodes with GPUs ---
+    # rack 0: node-0, node-1 ; rack 1: node-2, node-3
+    node_layout = [
+        (0, 55, rack_y + 35),    # node-0 in rack 0
+        (1, 185, rack_y + 35),   # node-1 in rack 0
+        (2, 415, rack_y + 35),   # node-2 in rack 1
+        (3, 545, rack_y + 35),   # node-3 in rack 1
+    ]
+
+    for node_idx, nx_, ny in node_layout:
+        # Node box
+        nw, nh = 120, 195
+        lines.append(f'<rect x="{nx_}" y="{ny}" width="{nw}" height="{nh}" rx="4" fill="#0f3460" stroke="#2c3e50"/>')
+        lines.append(f'<text x="{nx_+nw//2}" y="{ny+18}" text-anchor="middle" fill="#ecf0f1" font-size="11" font-weight="600">node-{node_idx}</text>')
+
+        # 8 GPUs in a 4x2 grid
+        gpu_start_x = nx_ + 10
+        gpu_start_y = ny + 28
+        gpu_w, gpu_h = 22, 18
+        gpu_gap_x, gpu_gap_y = 4, 4
+
+        for g in range(8):
+            row, col = divmod(g, 4)
+            gx = gpu_start_x + col * (gpu_w + gpu_gap_x)
+            gy = gpu_start_y + row * (gpu_h + gpu_gap_y)
+            color = _gpu_color(node_idx, g)
+            lines.append(f'<rect x="{gx}" y="{gy}" width="{gpu_w}" height="{gpu_h}" rx="2" fill="{color}" opacity="0.85"/>')
+            lines.append(f'<text x="{gx+gpu_w//2}" y="{gy+13}" text-anchor="middle" fill="white" font-size="8">G{g}</text>')
+
+        # ToR link
+        tor_id = "tor-0" if node_idx < 2 else "tor-1"
+        tx = tor_positions[tor_id]
+        link_lid = f"link-node-{node_idx}/gpu-0-{tor_id}"
+        stroke = "#e74c3c" if _link_affected(link_lid) else "#444"
+        lines.append(f'<line x1="{nx_+nw//2}" y1="{ny}" x2="{tx}" y2="{tor_y+15}" '
+                     f'stroke="{stroke}" stroke-width="1" opacity="0.6"/>')
+
+    # --- Legend ---
+    legend_y = svg_h - 30
+    legend_items = [
+        ("#2ecc71", "Healthy"),
+        ("#f39c12", "Throttled"),
+        ("#e74c3c", "Failed"),
+        ("#3498db", "Switch OK"),
+    ]
+    lx = 30
+    for color, label in legend_items:
+        lines.append(f'<rect x="{lx}" y="{legend_y}" width="14" height="14" rx="2" fill="{color}"/>')
+        lines.append(f'<text x="{lx+20}" y="{legend_y+11}" fill="#bdc3c7" font-size="11">{label}</text>')
+        lx += 100
+
+    lines.append("</svg>")
+    return "\n".join(lines)
+
+
 def generate_html(
     timeline: list[LogEntry],
     title: str = "DCSim Simulation Report",
@@ -284,13 +429,21 @@ def generate_html(
     fig_timeline = _build_gpu_timeline(timeline)
     fig_iterations = _build_iteration_durations(timeline)
     fig_table = _build_event_log_table(timeline)
+    dc_svg = _build_datacenter_svg(timeline)
 
     # Build combined HTML
     buf = io.StringIO()
-    buf.write(f"<html><head><title>{title}</title></head><body>\n")
+    buf.write(f"<html><head><title>{title}</title>")
+    buf.write("<style>body { font-family: -apple-system, sans-serif; margin: 20px; }</style>")
+    buf.write("</head><body>\n")
     buf.write(f"<h1>{title}</h1>\n")
 
-    # First figure includes plotly.js from CDN
+    # Datacenter diagram first
+    buf.write("<h2>Datacenter Topology</h2>\n")
+    buf.write(dc_svg)
+    buf.write("\n<hr>\n")
+
+    # Plotly charts
     buf.write(fig_timeline.to_html(full_html=False, include_plotlyjs="cdn"))
     buf.write("<hr>\n")
     buf.write(fig_iterations.to_html(full_html=False, include_plotlyjs=False))

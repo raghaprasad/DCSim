@@ -158,13 +158,14 @@ def scenario_link_flap() -> ScenarioResult:
 
 
 def run_all_scenarios() -> list[ScenarioResult]:
-    """Run all 4 demo scenarios and return results."""
-    return [
-        scenario_baseline(),
-        scenario_gpu_failure(),
-        scenario_thermal_throttle(),
-        scenario_link_flap(),
-    ]
+    """Run all named scenarios from NAMED_SCENARIOS."""
+    results: list[ScenarioResult] = []
+    for name, events in NAMED_SCENARIOS.items():
+        results.append(run_scenario(
+            name=name,
+            chaos_events=events if events else None,
+        ))
+    return results
 
 
 def print_summary(results: list[ScenarioResult]) -> None:
@@ -317,6 +318,7 @@ def load_chaos_file(path: str) -> list[ChaosEvent]:
 
 
 NAMED_SCENARIOS: dict[str, list[ChaosEvent]] = {
+    # --- Single-fault scenarios ---
     "baseline": [],
     "thermal_throttle": [
         ChaosEvent("node-1/gpu-4", "hardware.gpu.throttle", 320 * MILLISECOND,
@@ -329,6 +331,64 @@ NAMED_SCENARIOS: dict[str, list[ChaosEvent]] = {
     "xid_79": [
         ChaosEvent("node-3/gpu-1", "hardware.gpu.fail", 460 * MILLISECOND,
                    duration=10_000 * MILLISECOND),
+    ],
+
+    # --- Multi-fault scenarios ---
+
+    # Dual throttle: two GPUs in different racks, different severity.
+    # GPU 7 at 0.5x is mild; GPU 20 at 0.2x is severe and becomes the laggard.
+    "dual_throttle": [
+        ChaosEvent("node-0/gpu-7", "hardware.gpu.throttle", 140 * MILLISECOND,
+                   duration=None, properties={"throttle_factor": 0.5}),
+        ChaosEvent("node-2/gpu-4", "hardware.gpu.throttle", 510 * MILLISECOND,
+                   duration=None, properties={"throttle_factor": 0.2}),
+    ],
+
+    # Throttle + XID: one GPU sluggish from the start, then a second GPU dies
+    # mid-run. Training crawls, then halts for 8s, then resumes — still slow.
+    "throttle_then_xid": [
+        ChaosEvent("node-1/gpu-4", "hardware.gpu.throttle", 80 * MILLISECOND,
+                   duration=None, properties={"throttle_factor": 0.33}),
+        ChaosEvent("node-3/gpu-1", "hardware.gpu.fail", 700 * MILLISECOND,
+                   duration=8 * SECOND),
+    ],
+
+    # Throttle + link flap: GPU overheating slows compute, then a link flap
+    # hits during the (already delayed) comms phase. Double penalty.
+    "throttle_plus_link_flap": [
+        ChaosEvent("node-0/gpu-3", "hardware.gpu.throttle", 50 * MILLISECOND,
+                   duration=None, properties={"throttle_factor": 0.25}),
+        ChaosEvent("link-tor-1-spine-0", "hardware.link.fail", 500 * MILLISECOND,
+                   duration=80 * MILLISECOND),
+    ],
+
+    # XID + link flap: GPU failure knocks out training for 6s, and during
+    # recovery a network blip adds insult to injury.
+    "xid_plus_link_flap": [
+        ChaosEvent("node-2/gpu-5", "hardware.gpu.fail", 320 * MILLISECOND,
+                   duration=6 * SECOND),
+        ChaosEvent("link-tor-0-spine-1", "hardware.link.fail", 6_500 * MILLISECOND,
+                   duration=60 * MILLISECOND),
+    ],
+
+    # Cascading rack failure: both spine links from rack 0 go down in quick
+    # succession (partial then full isolation), then recover at different times.
+    "cascading_link_failure": [
+        ChaosEvent("link-tor-0-spine-0", "hardware.link.fail", 110 * MILLISECOND,
+                   duration=150 * MILLISECOND),
+        ChaosEvent("link-tor-0-spine-1", "hardware.link.fail", 130 * MILLISECOND,
+                   duration=200 * MILLISECOND),
+    ],
+
+    # Everything breaks: thermal throttle on rack 0 GPU, XID on rack 1 GPU,
+    # and a link flap — all overlapping. The worst-case scenario.
+    "perfect_storm": [
+        ChaosEvent("node-0/gpu-2", "hardware.gpu.throttle", 100 * MILLISECOND,
+                   duration=None, properties={"throttle_factor": 0.25}),
+        ChaosEvent("node-3/gpu-6", "hardware.gpu.fail", 800 * MILLISECOND,
+                   duration=7 * SECOND),
+        ChaosEvent("link-tor-0-spine-0", "hardware.link.fail", 7_900 * MILLISECOND,
+                   duration=100 * MILLISECOND),
     ],
 }
 

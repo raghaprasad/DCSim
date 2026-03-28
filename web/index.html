@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DCSim: Datacenter Chaos Engineering Simulator</title>
+<style>
+  :root { --bg: #0f172a; --surface: #1e293b; --border: #334155; --text: #e2e8f0; --muted: #94a3b8; --accent: #3b82f6; --green: #22c55e; --orange: #f59e0b; --red: #ef4444; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 1.8rem; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 24px; font-size: 0.95rem; }
+  .controls { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+  .controls-row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  select, input, textarea { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 0.9rem; font-family: inherit; }
+  select { min-width: 220px; }
+  textarea { width: 100%; min-height: 60px; margin-top: 8px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem; resize: vertical; }
+  button { background: var(--accent); color: white; border: none; padding: 8px 24px; border-radius: 6px; font-size: 0.9rem; cursor: pointer; font-weight: 600; height: 37px; }
+  button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status { margin-top: 12px; padding: 10px 14px; border-radius: 6px; font-size: 0.85rem; font-family: monospace; }
+  .status.loading { background: #1e3a5f; border: 1px solid #2563eb; color: #93c5fd; }
+  .status.ready { background: #14532d; border: 1px solid #22c55e; color: #86efac; }
+  .status.error { background: #450a0a; border: 1px solid #ef4444; color: #fca5a5; }
+  .summary-bar { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; display: flex; gap: 32px; align-items: center; flex-wrap: wrap; }
+  .summary-item { display: flex; flex-direction: column; }
+  .summary-item .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; }
+  .summary-item .value { font-size: 1.3rem; font-weight: 700; }
+  .summary-item .value.ok { color: var(--green); }
+  .summary-item .value.slow { color: var(--orange); }
+  .summary-item .value.bad { color: var(--red); }
+  #results { display: none; }
+  .chart-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; overflow: hidden; }
+  .chart-section h2 { font-size: 1.1rem; margin-bottom: 12px; color: var(--muted); }
+  .help-text { color: var(--muted); font-size: 0.82rem; margin-top: 6px; }
+  .help-text code { background: var(--bg); padding: 1px 5px; border-radius: 3px; font-size: 0.8rem; }
+  #loading-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(15,23,42,0.85); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+  .spinner { text-align: center; }
+  .spinner .dots { font-size: 2rem; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+  .spinner .msg { margin-top: 12px; color: var(--muted); }
+  .hidden { display: none !important; }
+  textarea.invalid { border-color: var(--red); }
+  .validation-error { color: var(--red); font-size: 0.82rem; margin-top: 4px; }
+  .validation-ok { color: var(--green); font-size: 0.82rem; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div id="loading-overlay">
+  <div class="spinner">
+    <div class="dots">&#9881;</div>
+    <div class="msg" id="load-msg">Loading Python runtime (Pyodide)...</div>
+  </div>
+</div>
+
+<div class="container">
+  <h1>DCSim: Datacenter Chaos Engineering Simulator</h1>
+  <p class="subtitle">Discrete event simulation of AI training under hardware chaos. Runs entirely in your browser via WebAssembly.</p>
+
+  <div class="controls">
+    <div class="controls-row">
+      <div class="field">
+        <label>Scenario</label>
+        <select id="scenario-select">
+          <option value="baseline">Baseline (no chaos)</option>
+          <option value="thermal_throttle">Thermal Throttle (0.33x)</option>
+          <option value="link_flap">Link Flap (100ms outage)</option>
+          <option value="xid_79">XID 79 — GPU Failure (10s repair)</option>
+          <option value="dual_throttle">Dual Throttle (0.5x + 0.2x)</option>
+          <option value="throttle_then_xid">Throttle + XID Failure</option>
+          <option value="throttle_plus_link_flap">Throttle + Link Flap</option>
+          <option value="xid_plus_link_flap">XID + Link Flap</option>
+          <option value="cascading_link_failure">Cascading Link Failure</option>
+          <option value="perfect_storm" selected>Perfect Storm (all three)</option>
+          <option value="custom">Custom (use text box below)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Steps</label>
+        <input id="steps-input" type="number" value="10" min="1" max="100" style="width:70px;">
+      </div>
+      <button id="run-btn" disabled>Run Simulation</button>
+    </div>
+    <div id="custom-chaos-section" class="hidden">
+      <textarea id="chaos-input" placeholder="gpu.throttle node-0/gpu-3 100ms throttle_factor=0.25&#10;gpu.fail node-3/gpu-6 800ms 7s&#10;link.fail link-tor-0-spine-0 500ms 80ms"></textarea>
+      <div id="validation-msg" class="help-text"></div>
+      <div class="help-text">One event per line: <code>&lt;type&gt; &lt;target&gt; &lt;time&gt; [duration] [key=val]</code>. Types: <code>gpu.fail</code>, <code>gpu.throttle</code>, <code>link.fail</code>, <code>switch.fail</code>. Times: <code>320ms</code>, <code>10s</code>.</div>
+    </div>
+    <div id="status-area"></div>
+  </div>
+
+  <div id="results">
+    <div class="summary-bar" id="summary-bar"></div>
+    <div class="chart-section">
+      <h2>Datacenter Topology</h2>
+      <div id="dc-svg"></div>
+    </div>
+    <div class="chart-section">
+      <h2>GPU State Timeline</h2>
+      <div id="chart-timeline"></div>
+    </div>
+    <div class="chart-section">
+      <h2>Iteration Durations</h2>
+      <div id="chart-iterations"></div>
+    </div>
+    <div class="chart-section">
+      <h2>Event Log</h2>
+      <div id="chart-events"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/plotly.js@2/dist/plotly.min.js"></script>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.5/full/pyodide.js"></script>
+<script>
+let pyodide = null;
+
+const scenarioSelect = document.getElementById('scenario-select');
+const customSection = document.getElementById('custom-chaos-section');
+const runBtn = document.getElementById('run-btn');
+const statusArea = document.getElementById('status-area');
+const loadMsg = document.getElementById('load-msg');
+const overlay = document.getElementById('loading-overlay');
+
+const chaosInput = document.getElementById('chaos-input');
+const validationMsg = document.getElementById('validation-msg');
+
+const VALID_TYPES = new Set([
+  'gpu.fail', 'gpu.throttle', 'gpu.repair', 'gpu.unthrottle',
+  'link.fail', 'link.repair', 'switch.fail', 'switch.repair',
+  'hardware.gpu.fail', 'hardware.gpu.throttle', 'hardware.gpu.repair', 'hardware.gpu.unthrottle',
+  'hardware.link.fail', 'hardware.link.repair', 'hardware.switch.fail', 'hardware.switch.repair',
+]);
+const TIME_RE = /^\d+(\.\d+)?(us|ms|s)$/;
+
+function validateChaosLine(line) {
+  const parts = line.trim().split(/\s+/);
+  if (parts.length < 3) return 'Need at least: <type> <target> <time>';
+  const [type, target, time, ...rest] = parts;
+  if (!VALID_TYPES.has(type)) return `Unknown event type: "${type}"`;
+  if (!TIME_RE.test(time)) return `Invalid time "${time}" — use e.g. 320ms, 10s, 1000us`;
+  // Check optional duration (4th part, if not key=value)
+  if (rest.length > 0 && !rest[0].includes('=') && !TIME_RE.test(rest[0]))
+    return `Invalid duration "${rest[0]}" — use e.g. 5s, 100ms`;
+  // Check key=value pairs
+  for (const kv of rest) {
+    if (kv.includes('=')) {
+      const [k, v] = kv.split('=', 2);
+      if (!k || v === undefined) return `Invalid property: "${kv}"`;
+    }
+  }
+  // Check target format hints
+  if (type.startsWith('gpu') || type === 'hardware.gpu.fail' || type === 'hardware.gpu.throttle') {
+    if (!target.match(/^node-\d+\/gpu-\d+$/))
+      return `GPU target should be like "node-0/gpu-3", got "${target}"`;
+  }
+  if (type.startsWith('link') || type === 'hardware.link.fail') {
+    if (!target.startsWith('link-'))
+      return `Link target should start with "link-", got "${target}"`;
+  }
+  return null; // valid
+}
+
+function validateChaosInput() {
+  const text = chaosInput.value.trim();
+  if (!text) {
+    chaosInput.classList.remove('invalid');
+    validationMsg.innerHTML = '';
+    validationMsg.className = 'help-text';
+    return true;
+  }
+  const lines = text.split('\n').filter(l => l.trim());
+  const errors = [];
+  lines.forEach((line, i) => {
+    const err = validateChaosLine(line);
+    if (err) errors.push(`Line ${i + 1}: ${err}`);
+  });
+  if (errors.length > 0) {
+    chaosInput.classList.add('invalid');
+    validationMsg.innerHTML = errors.join('<br>');
+    validationMsg.className = 'help-text validation-error';
+    return false;
+  }
+  chaosInput.classList.remove('invalid');
+  validationMsg.innerHTML = `${lines.length} event${lines.length > 1 ? 's' : ''} valid`;
+  validationMsg.className = 'help-text validation-ok';
+  return true;
+}
+
+chaosInput.addEventListener('input', validateChaosInput);
+
+scenarioSelect.addEventListener('change', () => {
+  customSection.classList.toggle('hidden', scenarioSelect.value !== 'custom');
+});
+
+function setStatus(msg, type) {
+  statusArea.innerHTML = `<div class="status ${type}">${msg}</div>`;
+}
+
+async function initPyodide() {
+  loadMsg.textContent = 'Loading Python runtime (Pyodide)...';
+  pyodide = await loadPyodide();
+
+  loadMsg.textContent = 'Installing packages (networkx, plotly)...';
+  await pyodide.loadPackage('micropip');
+  const micropip = pyodide.pyimport('micropip');
+  await micropip.install(['networkx', 'plotly']);
+
+  loadMsg.textContent = 'Installing DCSim...';
+  const wheelUrl = new URL('dist/dcsim-0.1.0-py3-none-any.whl', window.location.href).href;
+  await micropip.install(wheelUrl);
+
+  // Pre-import to warm up
+  await pyodide.runPythonAsync(`
+from dcsim.demo import run_scenario, NAMED_SCENARIOS, parse_chaos_string
+from dcsim.visualize import _build_gpu_timeline, _build_iteration_durations, _build_event_log_table, _build_datacenter_svg
+from dcsim.engine.clock import MILLISECOND, SECOND
+from dcsim.chaos.injector import ChaosEvent
+import json
+  `);
+
+  overlay.classList.add('hidden');
+  runBtn.disabled = false;
+  setStatus('Ready. Select a scenario and click Run.', 'ready');
+}
+
+runBtn.addEventListener('click', runSimulation);
+
+async function runSimulation() {
+  runBtn.disabled = true;
+  setStatus('Running simulation...', 'loading');
+  document.getElementById('results').style.display = 'none';
+
+  const scenario = scenarioSelect.value;
+  const steps = parseInt(document.getElementById('steps-input').value) || 10;
+  const chaosText = chaosInput.value.trim();
+
+  if (scenario === 'custom' && chaosText && !validateChaosInput()) {
+    setStatus('Fix validation errors in custom chaos input before running.', 'error');
+    runBtn.disabled = false;
+    return;
+  }
+
+  try {
+    const resultJson = await pyodide.runPythonAsync(`
+import json as _json
+
+_scenario = "${scenario}"
+_steps = ${steps}
+_chaos_text = """${chaosText}"""
+
+if _scenario == "custom" and _chaos_text:
+    _chaos_events = []
+    for _line in _chaos_text.strip().split("\\n"):
+        _line = _line.strip()
+        if _line:
+            _chaos_events.append(parse_chaos_string(_line))
+    _result = run_scenario(name="Custom chaos", chaos_events=_chaos_events, total_steps=_steps)
+elif _scenario != "custom":
+    _events = NAMED_SCENARIOS.get(_scenario, [])
+    _result = run_scenario(name=_scenario, chaos_events=_events if _events else None, total_steps=_steps)
+else:
+    _result = run_scenario(name="Baseline", total_steps=_steps)
+
+# Build visualizations — return figure JSON (not HTML) so JS can render via Plotly.newPlot
+_timeline = _result.timeline
+_svg = _build_datacenter_svg(_timeline)
+_fig_tl = _build_gpu_timeline(_timeline)
+_fig_it = _build_iteration_durations(_timeline)
+_fig_ev = _build_event_log_table(_timeline)
+
+_json.dumps({
+    "name": _result.name,
+    "state": _result.workload_state,
+    "steps": _result.steps_completed,
+    "total_steps": _result.total_steps,
+    "time_us": _result.final_time_us,
+    "events": _result.events_processed,
+    "svg": _svg,
+    "fig_timeline": _json.loads(_fig_tl.to_json()),
+    "fig_iterations": _json.loads(_fig_it.to_json()),
+    "fig_events": _json.loads(_fig_ev.to_json()),
+})
+    `);
+
+    const r = JSON.parse(resultJson);
+    const timeMs = (r.time_us / 1000).toFixed(1);
+    const overhead = ((r.time_us - 1500000) / 1500000 * 100).toFixed(0);
+    const cls = r.time_us <= 1500000 ? 'ok' : r.time_us < 5000000 ? 'slow' : 'bad';
+
+    document.getElementById('summary-bar').innerHTML = `
+      <div class="summary-item"><span class="label">Scenario</span><span class="value">${r.name}</span></div>
+      <div class="summary-item"><span class="label">Status</span><span class="value ok">${r.state}</span></div>
+      <div class="summary-item"><span class="label">Steps</span><span class="value">${r.steps}/${r.total_steps}</span></div>
+      <div class="summary-item"><span class="label">Time</span><span class="value ${cls}">${timeMs} ms</span></div>
+      <div class="summary-item"><span class="label">Overhead</span><span class="value ${cls}">${overhead > 0 ? '+' + overhead + '%' : 'none'}</span></div>
+      <div class="summary-item"><span class="label">Events</span><span class="value">${r.events}</span></div>
+    `;
+
+    document.getElementById('dc-svg').innerHTML = r.svg;
+
+    // Render Plotly charts via JS API (innerHTML doesn't execute script tags)
+    const plotConfig = { responsive: true, displayModeBar: false };
+
+    function renderPlot(divId, fig) {
+      const layout = fig.layout || {};
+      // Apply dark theme without clobbering figure's axis config
+      layout.paper_bgcolor = 'rgba(0,0,0,0)';
+      layout.plot_bgcolor = 'rgba(0,0,0,0)';
+      layout.font = Object.assign({}, layout.font || {}, { color: '#94a3b8' });
+      for (const axis of ['xaxis', 'yaxis']) {
+        layout[axis] = Object.assign({}, layout[axis] || {}, { gridcolor: '#334155' });
+      }
+      Plotly.newPlot(divId, fig.data || [], layout, plotConfig);
+    }
+
+    renderPlot('chart-timeline', r.fig_timeline);
+    renderPlot('chart-iterations', r.fig_iterations);
+    renderPlot('chart-events', r.fig_events);
+
+    document.getElementById('results').style.display = 'block';
+    setStatus(`Simulation complete: ${timeMs}ms, ${r.steps}/${r.total_steps} steps.`, 'ready');
+  } catch (e) {
+    setStatus(`Error: ${e.message}`, 'error');
+    console.error(e);
+  }
+
+  runBtn.disabled = false;
+}
+
+initPyodide().catch(e => {
+  loadMsg.textContent = `Failed to load: ${e.message}`;
+  console.error(e);
+});
+</script>
+</body>
+</html>

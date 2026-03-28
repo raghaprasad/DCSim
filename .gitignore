@@ -11,4 +11,4 @@ ui/dist/
 *.egg
 .DS_Store
 reports/
-*.html
+dcsim_report.html

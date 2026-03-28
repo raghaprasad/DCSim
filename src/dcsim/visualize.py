@@ -19,34 +19,31 @@ from dcsim.observer.logger import LogEntry
 
 
 def _build_gpu_timeline(timeline: list[LogEntry]) -> go.Figure:
-    """Build a Gantt-style horizontal bar chart of GPU states over time.
+    """Build a Gantt-style chart showing per-GPU-group behavior.
 
-    Tracks phase start/complete events for each GPU to show compute vs communicate
-    intervals, plus failure/throttle intervals.
+    For scenarios with throttling or failure, shows three rows:
+      - Affected GPU:   compute (slow/orange) for the full degraded duration
+      - Healthy GPUs:   compute (green, normal speed) then IDLE (gray, waiting)
+      - All 32 GPUs:    communicate (blue, after sync barrier)
+
+    For the baseline (no chaos), shows two rows:
+      - All GPUs: compute (green)
+      - All GPUs: communicate (blue)
     """
-    # Collect phase intervals from workload events
+    # --- Extract phase intervals ---
     phase_intervals: list[dict[str, Any]] = []
-
-    # Track active phases by job_id
     active_phases: dict[str, dict[str, Any]] = {}
-
-    # Track GPU-level state changes
-    gpu_state_intervals: list[dict[str, Any]] = []
-    gpu_active_state: dict[str, dict[str, Any]] = {}
 
     for entry in timeline:
         t_ms = entry.timestamp / 1_000.0
-
         if entry.event_type == "workload.phase.start":
-            phase = entry.data.get("phase", "")
-            step = entry.data.get("step", 0)
             job_id = entry.data.get("job_id", "")
             active_phases[job_id] = {
-                "phase": phase,
-                "step": step,
+                "phase": entry.data.get("phase", ""),
+                "step": entry.data.get("step", 0),
                 "start_ms": t_ms,
+                "duration_us": entry.data.get("duration_us", 0),
             }
-
         elif entry.event_type == "workload.phase.complete":
             job_id = entry.data.get("job_id", "")
             if job_id in active_phases:
@@ -56,94 +53,276 @@ def _build_gpu_timeline(timeline: list[LogEntry]) -> go.Figure:
                     "step": info["step"],
                     "start_ms": info["start_ms"],
                     "end_ms": t_ms,
+                    "duration_us": info["duration_us"],
                 })
 
-        elif entry.event_type in ("hardware.gpu.fail", "hardware.gpu.throttle"):
-            gpu_id = entry.component_id or ""
-            state = "failed" if "fail" in entry.event_type else "throttled"
-            gpu_active_state[gpu_id] = {"state": state, "start_ms": t_ms}
+    # --- Detect affected GPUs and timing ---
+    affected_gpus: dict[str, dict[str, Any]] = {}  # gpu_id -> {state, time, throttle_factor}
+    for entry in timeline:
+        if entry.event_type == "hardware.gpu.throttle":
+            gid = entry.component_id or ""
+            affected_gpus[gid] = {
+                "state": "throttled",
+                "time_ms": entry.timestamp / 1_000.0,
+                "throttle_factor": entry.data.get("throttle_factor", 0.33),
+            }
+        elif entry.event_type == "hardware.gpu.fail":
+            gid = entry.component_id or ""
+            affected_gpus[gid] = {
+                "state": "failed",
+                "time_ms": entry.timestamp / 1_000.0,
+            }
 
-        elif entry.event_type in ("hardware.gpu.repair", "hardware.gpu.unthrottle"):
-            gpu_id = entry.component_id or ""
-            if gpu_id in gpu_active_state:
-                info = gpu_active_state.pop(gpu_id)
-                gpu_state_intervals.append({
-                    "gpu_id": gpu_id,
-                    "state": info["state"],
-                    "start_ms": info["start_ms"],
-                    "end_ms": t_ms,
-                })
+    # Derive baseline compute duration from the first compute phase (before chaos)
+    baseline_compute_ms = 100.0  # default
+    for iv in phase_intervals:
+        if iv["phase"] == "compute":
+            baseline_compute_ms = iv["end_ms"] - iv["start_ms"]
+            break
 
+    # --- Build figure ---
     fig = go.Figure()
 
-    # Color mapping for phases
-    phase_colors = {
-        "compute": "rgba(55, 128, 191, 0.7)",
-        "communicate": "rgba(50, 171, 96, 0.7)",
+    COLORS = {
+        "compute": "#3780bf",        # blue
+        "communicate": "#32ab60",    # green
+        "idle_wait": "#95a5a6",      # gray — waiting at sync barrier
+        "throttled": "#f39c12",      # orange
+        "failed": "#e74c3c",         # red
     }
 
-    # Plot workload phases as bars at y="All GPUs" (since AllReduce is synchronous)
-    for interval in phase_intervals:
-        duration = interval["end_ms"] - interval["start_ms"]
-        color = phase_colors.get(interval["phase"], "rgba(128, 128, 128, 0.7)")
-        fig.add_trace(go.Bar(
-            y=["All GPUs"],
-            x=[duration],
-            base=[interval["start_ms"]],
-            orientation="h",
-            marker_color=color,
-            name=f"Step {interval['step']} {interval['phase']}",
-            showlegend=False,
-            hovertext=f"Step {interval['step']}: {interval['phase']}<br>"
-                       f"{interval['start_ms']:.1f}ms - {interval['end_ms']:.1f}ms<br>"
-                       f"Duration: {duration:.1f}ms",
-            hoverinfo="text",
-        ))
+    has_affected = len(affected_gpus) > 0
+    affected_label = ""
+    healthy_count = 32
 
-    # Plot GPU state intervals (failures, throttles)
-    state_colors = {
-        "failed": "rgba(219, 64, 82, 0.9)",
-        "throttled": "rgba(255, 165, 0, 0.9)",
-    }
+    if has_affected:
+        gid = next(iter(affected_gpus))
+        info = affected_gpus[gid]
+        state = info["state"]
+        affected_label = f"{gid} ({state})"
+        healthy_count = 31
 
-    for interval in gpu_state_intervals:
-        duration = interval["end_ms"] - interval["start_ms"]
-        color = state_colors.get(interval["state"], "rgba(128, 128, 128, 0.9)")
-        fig.add_trace(go.Bar(
-            y=[interval["gpu_id"]],
-            x=[duration],
-            base=[interval["start_ms"]],
-            orientation="h",
-            marker_color=color,
-            name=f"{interval['gpu_id']} {interval['state']}",
-            showlegend=False,
-            hovertext=f"{interval['gpu_id']}: {interval['state']}<br>"
-                       f"{interval['start_ms']:.1f}ms - {interval['end_ms']:.1f}ms",
-            hoverinfo="text",
-        ))
+        if state == "throttled":
+            _build_throttle_timeline(
+                fig, phase_intervals, gid, info,
+                baseline_compute_ms, healthy_count,
+                affected_label, COLORS,
+            )
+        elif state == "failed":
+            _build_failure_timeline(
+                fig, phase_intervals, gid, info,
+                baseline_compute_ms, healthy_count,
+                affected_label, COLORS, timeline,
+            )
+    else:
+        # Baseline — simple two-row view
+        for iv in phase_intervals:
+            dur = iv["end_ms"] - iv["start_ms"]
+            phase = iv["phase"]
+            color = COLORS.get(phase, COLORS["idle_wait"])
+            label = "All 32 GPUs"
+            fig.add_trace(go.Bar(
+                y=[label], x=[dur], base=[iv["start_ms"]], orientation="h",
+                marker_color=color, showlegend=False,
+                hovertext=f"Step {iv['step']}: {phase}<br>"
+                          f"{iv['start_ms']:.1f} - {iv['end_ms']:.1f}ms ({dur:.1f}ms)",
+                hoverinfo="text",
+            ))
 
-    # Add legend entries for phase types
-    for phase, color in phase_colors.items():
+    # --- Legend ---
+    legend_items = [
+        ("Compute", COLORS["compute"]),
+        ("Communicate", COLORS["communicate"]),
+        ("Idle (waiting)", COLORS["idle_wait"]),
+    ]
+    if has_affected:
+        state = next(iter(affected_gpus.values()))["state"]
+        legend_items.append((state.capitalize(), COLORS[state]))
+
+    for name, color in legend_items:
         fig.add_trace(go.Bar(
             y=[None], x=[None], orientation="h",
-            marker_color=color, name=phase.capitalize(), showlegend=True,
-        ))
-    for state, color in state_colors.items():
-        fig.add_trace(go.Bar(
-            y=[None], x=[None], orientation="h",
-            marker_color=color, name=state.capitalize(), showlegend=True,
+            marker_color=color, name=name, showlegend=True,
         ))
 
+    row_count = 3 if has_affected else 1
     fig.update_layout(
-        title="GPU State Timeline",
+        title="GPU State Timeline — Synchronous Training Barrier",
         xaxis_title="Time (ms)",
-        yaxis_title="Component",
+        yaxis_title="",
         barmode="overlay",
-        height=max(300, 50 * (len(gpu_state_intervals) + 2)),
+        height=max(300, 120 * row_count + 100),
         showlegend=True,
+        yaxis=dict(autorange="reversed"),
     )
 
     return fig
+
+
+def _build_throttle_timeline(
+    fig: go.Figure,
+    phase_intervals: list[dict[str, Any]],
+    gpu_id: str,
+    gpu_info: dict[str, Any],
+    baseline_compute_ms: float,
+    healthy_count: int,
+    affected_label: str,
+    colors: dict[str, str],
+) -> None:
+    """Add bars for a throttle scenario: affected GPU, healthy GPUs, all-GPU comms."""
+    throttle_time_ms = gpu_info["time_ms"]
+
+    row_affected = f"  {affected_label}"
+    row_healthy = f"  {healthy_count} Healthy GPUs"
+    row_comms = f"  All 32 GPUs (comms)"
+
+    for iv in phase_intervals:
+        start = iv["start_ms"]
+        end = iv["end_ms"]
+        dur = end - start
+        step = iv["step"]
+
+        if iv["phase"] == "communicate":
+            # Comms: all GPUs together
+            fig.add_trace(go.Bar(
+                y=[row_comms], x=[dur], base=[start], orientation="h",
+                marker_color=colors["communicate"], showlegend=False,
+                hovertext=f"Step {step}: allreduce<br>"
+                          f"{start:.1f} - {end:.1f}ms ({dur:.1f}ms)",
+                hoverinfo="text",
+            ))
+
+        elif iv["phase"] == "compute":
+            is_degraded = start >= throttle_time_ms or (start < throttle_time_ms < end)
+
+            if not is_degraded:
+                # Normal compute — all GPUs same speed
+                fig.add_trace(go.Bar(
+                    y=[row_healthy], x=[dur], base=[start], orientation="h",
+                    marker_color=colors["compute"], showlegend=False,
+                    hovertext=f"Step {step}: compute<br>"
+                              f"{start:.1f} - {end:.1f}ms ({dur:.1f}ms)",
+                    hoverinfo="text",
+                ))
+                fig.add_trace(go.Bar(
+                    y=[row_affected], x=[dur], base=[start], orientation="h",
+                    marker_color=colors["compute"], showlegend=False,
+                    hovertext=f"Step {step}: compute<br>"
+                              f"{start:.1f} - {end:.1f}ms ({dur:.1f}ms)",
+                    hoverinfo="text",
+                ))
+            else:
+                # Degraded: healthy GPUs finish early then wait
+                healthy_end = start + baseline_compute_ms
+                if healthy_end > end:
+                    healthy_end = end  # clamp
+                wait_dur = end - healthy_end
+
+                # Healthy GPUs: compute (normal speed)
+                fig.add_trace(go.Bar(
+                    y=[row_healthy], x=[baseline_compute_ms], base=[start],
+                    orientation="h", marker_color=colors["compute"], showlegend=False,
+                    hovertext=f"Step {step}: compute (healthy)<br>"
+                              f"{start:.1f} - {healthy_end:.1f}ms ({baseline_compute_ms:.1f}ms)",
+                    hoverinfo="text",
+                ))
+
+                # Healthy GPUs: idle/waiting for slow GPU
+                if wait_dur > 0.5:
+                    fig.add_trace(go.Bar(
+                        y=[row_healthy], x=[wait_dur], base=[healthy_end],
+                        orientation="h", marker_color=colors["idle_wait"], showlegend=False,
+                        hovertext=f"Step {step}: IDLE — waiting for {gpu_id}<br>"
+                                  f"{healthy_end:.1f} - {end:.1f}ms ({wait_dur:.1f}ms wasted)",
+                        hoverinfo="text",
+                    ))
+
+                # Affected GPU: full throttled compute
+                fig.add_trace(go.Bar(
+                    y=[row_affected], x=[dur], base=[start], orientation="h",
+                    marker_color=colors["throttled"], showlegend=False,
+                    hovertext=f"Step {step}: compute (throttled)<br>"
+                              f"{start:.1f} - {end:.1f}ms ({dur:.1f}ms — "
+                              f"{dur/baseline_compute_ms:.1f}x baseline)",
+                    hoverinfo="text",
+                ))
+
+
+def _build_failure_timeline(
+    fig: go.Figure,
+    phase_intervals: list[dict[str, Any]],
+    gpu_id: str,
+    gpu_info: dict[str, Any],
+    baseline_compute_ms: float,
+    healthy_count: int,
+    affected_label: str,
+    colors: dict[str, str],
+    timeline: list[LogEntry],
+) -> None:
+    """Add bars for a GPU failure scenario: failed GPU, healthy GPUs, comms."""
+    fail_time_ms = gpu_info["time_ms"]
+
+    # Find repair time
+    repair_time_ms = None
+    for entry in timeline:
+        if entry.event_type == "hardware.gpu.repair" and (entry.component_id or "") == gpu_id:
+            repair_time_ms = entry.timestamp / 1_000.0
+            break
+
+    row_affected = f"  {affected_label}"
+    row_healthy = f"  {healthy_count} Healthy GPUs"
+    row_comms = f"  All 32 GPUs (comms)"
+
+    # Show the failure gap on the affected GPU row
+    if repair_time_ms is not None:
+        gap = repair_time_ms - fail_time_ms
+        fig.add_trace(go.Bar(
+            y=[row_affected], x=[gap], base=[fail_time_ms], orientation="h",
+            marker_color=colors["failed"], showlegend=False,
+            hovertext=f"{gpu_id}: FAILED<br>"
+                      f"{fail_time_ms:.1f} - {repair_time_ms:.1f}ms "
+                      f"({gap:.0f}ms downtime — detection + reboot + reload)",
+            hoverinfo="text",
+        ))
+
+    # All GPUs idle during the failure gap
+    if repair_time_ms is not None:
+        gap = repair_time_ms - fail_time_ms
+        fig.add_trace(go.Bar(
+            y=[row_healthy], x=[gap], base=[fail_time_ms], orientation="h",
+            marker_color=colors["idle_wait"], showlegend=False,
+            hovertext=f"{healthy_count} GPUs: IDLE — waiting for {gpu_id} repair<br>"
+                      f"{fail_time_ms:.1f} - {repair_time_ms:.1f}ms ({gap:.0f}ms wasted)",
+            hoverinfo="text",
+        ))
+
+    for iv in phase_intervals:
+        start = iv["start_ms"]
+        end = iv["end_ms"]
+        dur = end - start
+        step = iv["step"]
+
+        if iv["phase"] == "communicate":
+            fig.add_trace(go.Bar(
+                y=[row_comms], x=[dur], base=[start], orientation="h",
+                marker_color=colors["communicate"], showlegend=False,
+                hovertext=f"Step {step}: allreduce<br>{start:.1f} - {end:.1f}ms",
+                hoverinfo="text",
+            ))
+        elif iv["phase"] == "compute":
+            # Show compute on both rows (all same speed for non-throttle)
+            fig.add_trace(go.Bar(
+                y=[row_healthy], x=[dur], base=[start], orientation="h",
+                marker_color=colors["compute"], showlegend=False,
+                hovertext=f"Step {step}: compute<br>{start:.1f} - {end:.1f}ms",
+                hoverinfo="text",
+            ))
+            fig.add_trace(go.Bar(
+                y=[row_affected], x=[dur], base=[start], orientation="h",
+                marker_color=colors["compute"], showlegend=False,
+                hovertext=f"Step {step}: compute<br>{start:.1f} - {end:.1f}ms",
+                hoverinfo="text",
+            ))
 
 
 def _build_iteration_durations(timeline: list[LogEntry]) -> go.Figure:
